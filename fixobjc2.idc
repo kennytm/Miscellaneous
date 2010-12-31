@@ -165,6 +165,7 @@ static create_structs () {
 static main () {
 	auto cl_ea, cl_base, c_ea, s_base, s_ea, s_name, cr_base, cr_ea, cr_target;
 	auto cat_base, cat_ea;
+	auto sr_base, sr_ea, sr_target;
 	
 	if (GetLongPrm(INF_FILETYPE) != 25 || (GetLongPrm(INF_PROCNAME) & 0xffffff) != 0x4d5241) {
 		Warning("fixobjc2.idc only works for Mach-O binaries with ARM processors.");
@@ -208,6 +209,17 @@ static main () {
 				MakeRptCmt(cr_ea, Name(cr_target));
 			}
 		}
+	}
+	
+	// name all superrefs
+	sr_base = SegByBase(SegByName("__objc_superrefs"));
+	if (sr_base >= 0) {
+	   for (sr_ea = SegStart(sr_base); sr_ea != SegEnd(sr_base); sr_ea = sr_ea + 4) {
+	       sr_target = Dword(sr_ea);
+	       if (sr_target > 0) {
+	           MakeRptCmt(sr_ea, Name(sr_target));
+	       }
+	   }
 	}
 	
 	// categories.
