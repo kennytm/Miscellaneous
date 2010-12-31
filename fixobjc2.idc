@@ -107,6 +107,61 @@ static categorize(c_ea) {
 	methodize(Dword(c_ea + 12), 1, cl_name);
 }
 
+static create_structs () {
+    auto id;
+    
+    id = AddStruc(-1, "method_t");
+    if (id != -1) {
+        AddStrucMember(id, "name",  0, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "types", 4, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "imp",   8, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+    }
+    
+    id = AddStruc(-1, "method_list_t");
+    if (id != -1) {
+        AddStrucMember(id, "entsize_NEVER_USE",  0, FF_DWRD|FF_DATA, -1, 4);
+        AddStrucMember(id, "count",              4, FF_DWRD|FF_DATA, -1, 4);
+    }
+    
+    id = AddStruc(-1, "class_t");
+    if (id != -1) {
+        AddStrucMember(id, "isa",        0, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "superclass", 4, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "cache",      8, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "vtable",    12, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "data",      16, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+    }
+    
+    id = AddStruc(-1, "class_ro_t");
+    if (id != -1) {
+        AddStrucMember(id, "flags",           0, FF_DWRD|FF_DATA, -1, 4);
+        AddStrucMember(id, "instanceStart",   4, FF_DWRD|FF_DATA, -1, 4);
+        AddStrucMember(id, "instanceSize",    8, FF_DWRD|FF_DATA, -1, 4);
+        AddStrucMember(id, "ivarLayout",     12, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "name",           16, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "baseMethods",    20, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "baseProtocols",  24, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "ivars",          28, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "weakIvarLayout", 32, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "baseProperties", 36, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+    }
+    
+    id = AddStruc(-1, "ivar_list_t");
+    if (id != -1) {
+        AddStrucMember(id, "entsize", 0, FF_DWRD|FF_DATA, -1, 4);
+        AddStrucMember(id, "count",   4, FF_DWRD|FF_DATA, -1, 4);
+    }
+    
+    id = AddStruc(-1, "ivar_t");
+    if (id != -1) {
+        AddStrucMember(id, "offset",     0, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "name",       4, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "type",       8, FF_DWRD|FF_0OFF|FF_1OFF|FF_DATA, -1, 4, -1, 0, REF_OFF32);
+        AddStrucMember(id, "alignment", 12, FF_DWRD|FF_DATA, -1, 4);
+        AddStrucMember(id, "size",      16, FF_DWRD|FF_DATA, -1, 4);
+    }
+}
+
 static main () {
 	auto cl_ea, cl_base, c_ea, s_base, s_ea, s_name, cr_base, cr_ea, cr_target;
 	auto cat_base, cat_ea;
@@ -115,6 +170,8 @@ static main () {
 		Warning("fixobjc2.idc only works for Mach-O binaries with ARM processors.");
 		return;
 	}
+
+	create_structs();
 
 	offsetize("__objc_classrefs");
 	offsetize("__objc_classlist");
