@@ -32,7 +32,7 @@ static offsetize(name) {
 	}
 }
 
-static functionize (ea, is_meta, cls, sel) {
+static functionize (ea, is_meta, cls, selname, sel) {
 	auto is_thumb, head_ea, ea_flags;
 	is_thumb = ea & 1;
 	ea = ea & ~1;
@@ -44,15 +44,18 @@ static functionize (ea, is_meta, cls, sel) {
 		MakeCode(ea);
 	}
 	MakeFunction(ea, BADADDR);
-	MakeName(ea, (is_meta ? "@" : "") + cls + "." + sel);
-	SetFunctionCmt(ea, (is_meta ? "+" : "-") + "[" + cls + " " + sel + "]", 1);
+	MakeName(ea, (is_meta ? "@" : "") + cls + "." + selname);
+	SetFunctionCmt(ea, (is_meta ? "+" : "-") + "[" + cls + " " + selname + "]", 1);
 }
 
 static methodize (m_ea, is_meta, cl_name) {
 	auto m_size, m_count, m_i, m_sname, m_cname;
+	auto m_sname_ptr, m_sel;
 
 	if (m_ea <= 0)
 		return;
+		
+	m_sel = -1;
 
 	m_size = Dword(m_ea);
 	m_count = Dword(m_ea + 4);
@@ -61,8 +64,16 @@ static methodize (m_ea, is_meta, cl_name) {
 	m_ea = m_ea + 8;
 	for (m_i = 0; m_i < m_count; m_i = m_i + 1) {
 		MakeStruct(m_ea, "method_t");
-		m_sname = GetString(Dword(m_ea), -1, ASCSTR_C);
-		functionize(Dword(m_ea + 8), is_meta, cl_name, m_sname);
+		m_sname_ptr = Dword(m_ea);
+		/* find which selector is referencing this text. */
+		if (0) {
+		m_sel = DfirstB(m_sname_ptr);
+		while (m_sel != -1 && SegName(m_sel) != "__objc_selrefs")
+			m_sel = DnextB(m_sname_ptr, m_sel);
+		}
+		
+		m_sname = GetString(m_sname_ptr, -1, ASCSTR_C);
+		functionize(Dword(m_ea + 8), is_meta, cl_name, m_sname, m_sel);
 		m_ea = m_ea + m_size;
 	}
 }
@@ -181,16 +192,6 @@ static main () {
 	offsetize("__objc_superrefs");
 	offsetize("__objc_selrefs");
 	
-	// find all methods & ivars.
-	cl_base = SegByBase(SegByName("__objc_classlist"));
-	if (cl_base >= 0) {
-		for (cl_ea = SegStart(cl_base); cl_ea != SegEnd(cl_base); cl_ea = cl_ea + 4) {
-			c_ea = Dword(cl_ea);
-			classize(c_ea, 0);
-			classize(Dword(c_ea), 1);
-		}
-	}
-	
 	// name all selectors
 	s_base = SegByBase(SegByName("__objc_selrefs"));
 	if (s_base >= 0) {
@@ -200,6 +201,16 @@ static main () {
 		}
 	}
 	
+	// find all methods & ivars.
+	cl_base = SegByBase(SegByName("__objc_classlist"));
+	if (cl_base >= 0) {
+		for (cl_ea = SegStart(cl_base); cl_ea != SegEnd(cl_base); cl_ea = cl_ea + 4) {
+			c_ea = Dword(cl_ea);
+			classize(c_ea, 0);
+			classize(Dword(c_ea), 1);
+		}
+	}
+		
 	// name all classrefs
 	cr_base = SegByBase(SegByName("__objc_classrefs"));
 	if (cr_base >= 0) {
