@@ -38,7 +38,7 @@ public:
 
 class DataFile {
 protected:
-	char* m_data;
+	unsigned char* m_data;
 	off_t m_filesize;
 	int m_fd;
 	off_t m_location;
@@ -46,7 +46,7 @@ protected:
 public:
 	DataFile(const char* path);
 	
-	inline const char* data() const throw() { return m_data; }
+	inline const unsigned char* data() const throw() { return m_data; }
 	inline off_t filesize() const throw() { return m_filesize; }
 	
 	inline void seek(off_t new_location) throw() { m_location = new_location; }
@@ -57,10 +57,10 @@ public:
 	inline bool is_eof() const throw() { return m_location == m_filesize; }
 	
 	unsigned read_integer() throw();
-	char read_char() throw() { return m_data[m_location++]; }
+	char read_char() throw() { return static_cast<char>(m_data[m_location++]); }
 	const char* read_string(std::size_t* p_string_length = NULL) throw();
 	const char* read_ASCII_string(std::size_t* p_string_length = NULL) throw();
-	const char* read_raw_data(std::size_t data_size) throw();
+	const unsigned char* read_raw_data(std::size_t data_size) throw();
 	
 	const char* peek_ASCII_Cstring_at(off_t offset, std::size_t* p_string_length = NULL) const throw();
 	inline const char* peek_ASCII_Cstring(std::size_t* p_string_length = NULL) const throw() {
@@ -69,14 +69,10 @@ public:
 	
 	template<typename T>
 	const T* read_data() throw() {
-		m_location += sizeof(T);
-		if (m_location <= m_filesize) {
-			union {
-				const T* as_T_pointer;
-				const char* as_char_pointer;
-			} res;
-			res.as_char_pointer = m_data+m_location-sizeof(T);
-			return res.as_T_pointer;
+		if (m_location + static_cast<off_t>(sizeof(T)) <= m_filesize) {
+			const T* retval = reinterpret_cast<const T*>(m_data + m_location);
+			m_location += sizeof(T);
+			return retval;
 		} else {
 			return NULL;
 		}
@@ -88,13 +84,8 @@ public:
 	
 	template<typename T>
 	inline const T* peek_data(unsigned items_after = 0) throw() {
-		if (m_location+static_cast<off_t>(items_after*sizeof(T)) <= m_filesize) {
-			union {
-				const T* as_T_pointer;
-				const char* as_char_pointer;
-			} res;
-			res.as_char_pointer = m_data + m_location;
-			return res.as_T_pointer + items_after;
+		if (m_location+static_cast<off_t>((1+items_after)*sizeof(T)) <= m_filesize) {
+			return reinterpret_cast<const T*>(m_data + m_location) + items_after;
 		} else
 			return NULL;
 	}	
@@ -102,12 +93,7 @@ public:
 	template<typename T>
 	inline const T* peek_data_at(off_t offset) const throw() {
 		if (offset+static_cast<off_t>(sizeof(T)) <= m_filesize) {
-			union {
-				const T* as_T_pointer;
-				const char* as_char_pointer;
-			} res;
-			res.as_char_pointer = m_data + offset;
-			return res.as_T_pointer;
+			return reinterpret_cast<const T*>(m_data + offset);
 		} else
 			return NULL;
 	}
@@ -144,7 +130,7 @@ public:
 		return res;		
 	}
 	
-	bool search_forward(const char* data, size_t length) throw();
+	bool search_forward(const unsigned char* data, size_t length) throw();
 	
 	~DataFile() throw();
 };
