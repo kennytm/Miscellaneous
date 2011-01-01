@@ -135,4 +135,9 @@ public:
 	~DataFile() throw();
 };
 
+template<>
+inline const void* DataFile::peek_data_at<void>(off_t offset) const throw() {
+    return m_data + offset;
+}
+
 #endif
