@@ -69,6 +69,7 @@
 #include <boost/filesystem.hpp>
 #include <utility>
 #include <boost/unordered_map.hpp>
+#include <boost/foreach.hpp>
 
 struct dyld_cache_header {
 	char		magic[16];		
@@ -348,51 +349,73 @@ static void putchar_and_flush(char c) throw() {
     fflush(stdout);
 }
 
+static bool streq(const char x[16], const char* y) {
+    return strncmp(x, y, 16) == 0;
+} 
+
 class ProgramContext;
 
 
 class ExtraStringRepository {
     struct Entry {
+        const char* string;
         size_t size;
         uint32_t new_address;
-        std::vector<off_t> override_offsets;
+        std::vector<uint32_t> override_addresses;
     };
     
-    boost::unordered_map<const char*, Entry> _entries;
+    boost::unordered_map<const char*, int> _indices;
+    std::vector<Entry> _entries;
     size_t _total_size;
     
+    section _template;
+    
 public:
-    ExtraStringRepository() : _total_size(0) {}
+    ExtraStringRepository(const char* segname, const char* sectname, uint32_t flags, uint32_t alignment) {
+        memset(&_template, 0, sizeof(_template));
+        strncpy(_template.segname, segname, 16);
+        strncpy(_template.sectname, sectname, 16);
+        _template.flags = flags;
+        _template.align = alignment;
+    }
 
-    void insert(const char* string, off_t override_offset) {
-        boost::unordered_map<const char*, Entry>::iterator it = _entries.find(string);
-        if (it != _entries.end()) {
-            it->second.override_offsets.push_back(override_offset);
+    void insert(const char* string, size_t size, uint32_t override_address) {
+        boost::unordered_map<const char*, int>::const_iterator it = _indices.find(string);
+        if (it != _indices.end()) {
+            _entries[it->second].override_addresses.push_back(override_address);
         } else {
             Entry entry;
-            entry.size = strlen(string) + 1;
-            entry.new_address = 0;
-            entry.override_offsets.push_back(override_offset);
-            _entries.insert(std::make_pair(string, entry));
-            _total_size += entry.size;
+            entry.string = string;
+            entry.size = size;
+            entry.new_address = this->next_vmaddr();
+            entry.override_addresses.push_back(override_address);
+            _indices.insert(std::make_pair(string, _entries.size()));
+            _entries.push_back(entry);
+            _template.size += size;
         }
     }
     
-    template <typename Object, typename T>
-    void foreach_entry(Object* self, T context, void (Object::*action)(T context, const char* string, size_t size, uint32_t& new_address, const std::vector<off_t>& override_offsets)) {
-        for (boost::unordered_map<const char*, Entry>::iterator it = _entries.begin(); it != _entries.end(); ++ it)
-            (self->*action)(context, it->first, it->second.size, it->second.new_address, it->second.override_offsets);
+    void insert(const char* string, uint32_t override_address) {
+        this->insert(string, strlen(string) + 1, override_address);
+    }
+
+        
+    template <typename Object>
+    void foreach_entry(const Object* self, void (Object::*action)(const char* string, size_t size, uint32_t new_address, const std::vector<uint32_t>& override_addresses) const) const {
+        BOOST_FOREACH(const Entry& e, _entries) {
+            (self->*action)(e.string, e.size, e.new_address, e.override_addresses);
+        }
     }
     
-    template <typename Object, typename T>
-    void foreach_entry(const Object* self, T context, void (Object::*action)(T context, const char* string, size_t size, uint32_t new_address, const std::vector<off_t>& override_offsets) const) const {
-        for (boost::unordered_map<const char*, Entry>::const_iterator it = _entries.begin(); it != _entries.end(); ++ it)
-            (self->*action)(context, it->first, it->second.size, it->second.new_address, it->second.override_offsets);
-    }
+    void increase_size_by(size_t delta) { _template.size += delta; }
+    size_t total_size() const { return _template.size; }
+    bool has_content() const { return _template.size != 0; }
     
-    void increase_size_by(size_t delta) { _total_size += delta; }
-    size_t total_size() const { return _total_size; }
-    bool has_content() const { return _total_size != 0; }
+    section section_template() const { return _template; }
+    
+    void set_section_vmaddr(uint32_t vmaddr) { _template.addr = vmaddr; }
+    void set_section_fileoff(uint32_t fileoff) { _template.offset = fileoff; }
+    uint32_t next_vmaddr() const { return _template.addr + _template.size; }
 };
 
 
@@ -409,11 +432,7 @@ class DecachingFile {
         uint32_t new_address;
         off_t override_offset;
     };
-    
-    struct SegmentVMRange {
-        uint32_t begin, end;
-    };
-        
+            
     struct {
         long rebase_off, bind_off, weak_bind_off,
                lazy_bind_off, export_off,            // dyld_info
@@ -423,15 +442,20 @@ class DecachingFile {
         int32_t strsize;
     } _new_linkedit_offsets;
     
+private:
+    
     uint32_t _linkedit_offset, _linkedit_size;
     
     FILE* _f;
     const mach_header* _header;
     std::vector<FileoffFixup> _fixups;
     const ProgramContext* _context;
-    ExtraStringRepository _extrastrs;
-    std::vector<SegmentVMRange> _segment_vm_ranges;
-    std::vector<off_t> _entsize12_patches;
+    std::vector<const segment_command*> _segments;
+    std::vector<segment_command> _new_segments;
+    ExtraStringRepository _extra_text, _extra_data;
+    std::vector<uint32_t> _entsize12_patches;
+    
+private:
     
     void open_file(const std::string& filename) {
         _f = fopen_and_create_missing_dirs(filename);
@@ -441,19 +465,12 @@ class DecachingFile {
         }
     }
     
-    void write_extrastr(long vmdelta, const char* string, size_t size, uint32_t& new_address, const std::vector<off_t>&) {
-        new_address = ftell(_f) + vmdelta;
+    void write_extrastr(const char* string, size_t size, uint32_t, const std::vector<uint32_t>&) const {
         fwrite(string, size, 1, _f);
     }
     
     void write_segment_content(const segment_command* cmd);
-    
-    void write_segment_content_proxy(const load_command* cmd) {
-        if (cmd->cmd == LC_SEGMENT) {
-            this->write_segment_content(static_cast<const segment_command*>(cmd));
-        }
-    }
-    
+        
     void foreach_command(void(DecachingFile::*action)(const load_command* cmd)) {
         const unsigned char* cur_cmd = reinterpret_cast<const unsigned char*>(_header + 1);
         
@@ -465,14 +482,30 @@ class DecachingFile {
         }
     }
     
+    ExtraStringRepository* repo_for_segname(const char* segname) {
+        if (!strcmp(segname, "__DATA"))
+            return &_extra_data;
+        else if (!strcmp(segname, "__TEXT"))
+            return &_extra_text;
+        return NULL;
+    }
+    
+    const ExtraStringRepository* repo_for_segname(const char* segname) const {
+        if (!strcmp(segname, "__DATA"))
+            return &_extra_data;
+        else if (!strcmp(segname, "__TEXT"))
+            return &_extra_text;
+        return NULL;
+    }
+    
     template<typename T>
     void fix_offset(T& fileoff) const {
         if (fileoff == 0)
             return;
         
-        for (std::vector<FileoffFixup>::const_reverse_iterator cit = _fixups.rbegin(); cit != _fixups.rend(); ++ cit) {
-            if (cit->sourceBegin <= fileoff && fileoff < cit->sourceEnd) {
-                fileoff -= cit->negDelta;
+        BOOST_REVERSE_FOREACH(const FileoffFixup& fixup, _fixups) {
+            if (fixup.sourceBegin <= fileoff && fileoff < fixup.sourceEnd) {
+                fileoff -= fixup.negDelta;
                 return;
             }
         }
@@ -489,49 +522,37 @@ class DecachingFile {
                 
             case LC_SEGMENT: {
                 segment_command segcmd = *static_cast<const segment_command*>(cmd);
-                if (!strncmp(segcmd.segname, "__LINKEDIT", sizeof(segcmd.segname))) {
+                if (streq(segcmd.segname, "__LINKEDIT")) {
                     segcmd.vmsize = _linkedit_size;
                     segcmd.fileoff = _linkedit_offset;
                     segcmd.filesize = _linkedit_size;
                     fwrite(&segcmd, sizeof(segcmd), 1, _f);
                     putchar_and_flush('l');
                 } else {
-                    bool is_text = _extrastrs.has_content() && !strncmp(segcmd.segname, "__TEXT", sizeof(segcmd.segname));
+                    const ExtraStringRepository* extra_repo = this->repo_for_segname(segcmd.segname);
+                    bool has_extra_sect = extra_repo && extra_repo->has_content();
                     
                     this->fix_offset(segcmd.fileoff);
-                    section* sects = new section[segcmd.nsects + is_text];
+                    section* sects = new section[segcmd.nsects + has_extra_sect];
                     memcpy(sects, 1 + static_cast<const segment_command*>(cmd), segcmd.nsects * sizeof(*sects));
                     for (uint32_t i = 0; i < segcmd.nsects; ++ i) {
                         this->fix_offset(sects[i].offset);
                         this->fix_offset(sects[i].reloff);
                     }
-                    if (is_text) {
-                        memcpy(sects[segcmd.nsects].sectname, "__objc_extrastr\0", 16);
-                        memcpy(sects[segcmd.nsects].segname, "__TEXT\0\0\0\0\0\0\0\0\0\0", 16);
-                        sects[segcmd.nsects].addr = segcmd.vmaddr + segcmd.vmsize;
-                        sects[segcmd.nsects].size = _extrastrs.total_size();
-                        sects[segcmd.nsects].offset = segcmd.fileoff + segcmd.filesize;
-                        sects[segcmd.nsects].reloff = 0;
-                        sects[segcmd.nsects].nreloc = 0;
-                        sects[segcmd.nsects].reloff = 0;
-                        sects[segcmd.nsects].flags = 2; // S_CSTRING_LITERALS
-                        sects[segcmd.nsects].reserved1 = 0;
-                        sects[segcmd.nsects].reserved2 = 0;
-                        segcmd.cmdsize += sizeof(section);
-                        segcmd.vmsize += _extrastrs.total_size();
-                        segcmd.filesize += _extrastrs.total_size();
+                    if (has_extra_sect) {
+                        uint32_t extra_sect_size = extra_repo->total_size();
+                        sects[segcmd.nsects] = extra_repo->section_template();
+                        segcmd.cmdsize += sizeof(*sects);
+                        segcmd.vmsize += extra_sect_size;
+                        segcmd.filesize += extra_sect_size;
                         segcmd.nsects += 1;
-                        long curloc = ftell(_f);
-                        fseek(_f, offsetof(mach_header, sizeofcmds), SEEK_SET);
-                        uint32_t new_sizeofcmds = _header->sizeofcmds + sizeof(section);
-                        fwrite(&new_sizeofcmds, sizeof(new_sizeofcmds), 1, _f);
-                        fseek(_f, curloc, SEEK_SET);
                     }
                     fwrite(&segcmd, sizeof(segcmd), 1, _f);
                     fwrite(sects, sizeof(*sects), segcmd.nsects, _f);
                     putchar_and_flush('s');
                     delete[] sects;
                 }
+                _new_segments.push_back(segcmd);
                 break;
             }
             
@@ -616,70 +637,91 @@ class DecachingFile {
         }
     }
     
-    void retrieve_segment_vm_ranges(const load_command* cmd) {
+    void retrieve_segments(const load_command* cmd) {
         if (cmd->cmd == LC_SEGMENT) {
             const segment_command* segcmd = static_cast<const segment_command*>(cmd);
-            SegmentVMRange r = {segcmd->vmaddr, segcmd->vmaddr + segcmd->vmsize};
-            _segment_vm_ranges.push_back(r);
+            _segments.push_back(segcmd);
+            ExtraStringRepository* repo = this->repo_for_segname(segcmd->segname);
+            if (repo)
+                repo->set_section_vmaddr(segcmd->vmaddr + segcmd->vmsize);
         }
     }
     
-    bool contains_address(uint32_t addr) const {
-        for (std::vector<SegmentVMRange>::const_iterator cit = _segment_vm_ranges.begin(); cit != _segment_vm_ranges.end(); ++ cit)
-            if (cit->begin <= addr && addr < cit->end)
+    long from_vmaddr(uint32_t vmaddr) const {
+        BOOST_FOREACH(const segment_command* segcmd, _segments) {
+            if (segcmd->vmaddr <= vmaddr && vmaddr < segcmd->vmaddr + segcmd->vmsize)
+                return vmaddr - segcmd->vmaddr + segcmd->fileoff;
+        }
+        return -1;
+    }
+    
+    long from_new_vmaddr(uint32_t vmaddr) const {
+        BOOST_FOREACH(const segment_command& segcmd, _new_segments) {
+            if (segcmd.vmaddr <= vmaddr && vmaddr < segcmd.vmaddr + segcmd.vmsize)
+                return vmaddr - segcmd.vmaddr + segcmd.fileoff;
+        }
+        return -1;
+    }
+    
+    bool contains_address(uint32_t vmaddr) const {
+        BOOST_FOREACH(const segment_command* segcmd, _segments) {
+            if (segcmd->vmaddr <= vmaddr && vmaddr < segcmd->vmaddr + segcmd->vmsize)
                 return true;
+        }
         return false;
     }
     
-    void prepare_patch_objc_methods(uint32_t method_vmaddr);
-    void prepare_objc_extrastr(const load_command* cmd);
+    void prepare_patch_objc_methods(uint32_t method_vmaddr, uint32_t override_vmaddr);
+    void prepare_objc_extrastr(const segment_command* segcmd);
     
-    void patch_objc_sects_callback(int, const char* string, size_t, uint32_t new_address, const std::vector<off_t>& override_offsets) const {
-        for (std::vector<off_t>::const_iterator cit = override_offsets.begin(); cit != override_offsets.end(); ++ cit) {
-            off_t actual_offset = *cit;
-            this->fix_offset(actual_offset);
-            printf("%lx[%lx][%lx] = %s\n", actual_offset, *cit, new_address, string);
+    void patch_objc_sects_callback(const char*, size_t, uint32_t new_address, const std::vector<uint32_t>& override_addresses) const {
+        BOOST_FOREACH(uint32_t vmaddr, override_addresses) {
+            long actual_offset = this->from_new_vmaddr(vmaddr);
+            assert(actual_offset >= 0);
             fseek(_f, actual_offset, SEEK_SET);
             fwrite(&new_address, 4, 1, _f);
         }
     }
     
     void patch_objc_sects() const {
-        _extrastrs.foreach_entry(this, 0, &DecachingFile::patch_objc_sects_callback);
+        _extra_text.foreach_entry(this, &DecachingFile::patch_objc_sects_callback);
+        _extra_data.foreach_entry(this, &DecachingFile::patch_objc_sects_callback);
         
-        const uint32_t twelve = sizeof(method_t);
-        for (std::vector<off_t>::const_iterator cit = _entsize12_patches.begin(); cit != _entsize12_patches.end(); ++ cit) {
-            off_t actual_offset = *cit;
-            this->fix_offset(actual_offset);
-            fseek(_f, actual_offset, SEEK_SET);
-            fwrite(&twelve, 4, 1, _f);
-        }
+        this->patch_objc_sects_callback(NULL, 0, sizeof(method_t), _entsize12_patches);
     }
     
 public:
-    DecachingFile(const std::string& filename, const mach_header* header, const ProgramContext* context) : _header(header), _context(context) {
-        memset(&_new_linkedit_offsets, 0, sizeof(_new_linkedit_offsets));
-        
+    DecachingFile(const std::string& filename, const mach_header* header, const ProgramContext* context) : 
+        _header(header), _context(context),
+        _extra_text("__TEXT", "__objc_extratxt", 2, 0),
+        _extra_data("__DATA", "__objc_extradat", 0, 2)
+    {
         if (header->magic != 0xfeedface) {
             fprintf(stderr,
                 "Error: Cannot dump '%s'. Only 32-bit little-endian single-file\n"
                 "       Mach-O objects are supported.\n", filename.c_str());
             return;
         }
-        
-        open_file(filename);
+        memset(&_new_linkedit_offsets, 0, sizeof(_new_linkedit_offsets));
+                
+        this->open_file(filename);
         if (!_f)
             return;
         
-        this->foreach_command(&DecachingFile::retrieve_segment_vm_ranges);
-        this->foreach_command(&DecachingFile::prepare_objc_extrastr);
+        this->foreach_command(&DecachingFile::retrieve_segments);
+        BOOST_FOREACH(const segment_command* segcmd, _segments)
+            this->prepare_objc_extrastr(segcmd);
         
-        this->foreach_command(&DecachingFile::write_segment_content_proxy);
+        BOOST_FOREACH(const segment_command* segcmd, _segments)
+            this->write_segment_content(segcmd);
         
         _linkedit_offset = static_cast<uint32_t>(ftell(_f));
         this->foreach_command(&DecachingFile::write_real_linkedit);
         _linkedit_size = static_cast<uint32_t>(ftell(_f)) - _linkedit_offset;
         
+        fseek(_f, offsetof(mach_header, sizeofcmds), SEEK_SET);
+        uint32_t new_sizeofcmds = _header->sizeofcmds + (_extra_text.has_content() + _extra_data.has_content()) * sizeof(section);
+        fwrite(&new_sizeofcmds, sizeof(new_sizeofcmds), 1, _f);
         fseek(_f, sizeof(*header), SEEK_SET);
         this->foreach_command(&DecachingFile::fix_file_offsets);
         
@@ -899,27 +941,30 @@ public:
 };
 
 
-void DecachingFile::write_segment_content(const segment_command* cmd) {
-    const char* data_ptr = _context->peek_char_at_vmaddr(cmd->vmaddr);
-    long new_fileoff = ftell(_f);
-    if (strncmp(cmd->segname, "__LINKEDIT", sizeof(cmd->segname))) {
-        fwrite(data_ptr, 1, cmd->filesize, _f);
-        uint32_t filesize = cmd->filesize;
+void DecachingFile::write_segment_content(const segment_command* segcmd) {
+    ExtraStringRepository* repo = this->repo_for_segname(segcmd->segname);
     
-        if (!strncmp(cmd->segname, "__TEXT", sizeof(cmd->segname))) {
-            long vmdelta = cmd->vmaddr - new_fileoff;
-            _extrastrs.foreach_entry(this, vmdelta, &DecachingFile::write_extrastr);
+    if (repo) {    
+        const char* data_ptr = _context->peek_char_at_vmaddr(segcmd->vmaddr);
+        long new_fileoff = ftell(_f);
+
+        fwrite(data_ptr, 1, segcmd->filesize, _f);
+        uint32_t filesize = segcmd->filesize;
+    
+        if (repo->has_content()) {
+            repo->foreach_entry(this, &DecachingFile::write_extrastr);
             
             long extra = ftell(_f) % 8;
             if (extra) {
                 char padding[8] = {0};
                 fwrite(padding, 1, 8-extra, _f);
-                _extrastrs.increase_size_by(8-extra);
+                repo->increase_size_by(8-extra);
             }
-            filesize += _extrastrs.total_size();
+            repo->set_section_fileoff(new_fileoff + filesize);
+            filesize += repo->total_size();
         }
         
-        FileoffFixup fixup = {cmd->fileoff, cmd->fileoff + filesize, cmd->fileoff - new_fileoff};
+        FileoffFixup fixup = {segcmd->fileoff, segcmd->fileoff + filesize, segcmd->fileoff - new_fileoff};
         _fixups.push_back(fixup);
         putchar_and_flush('w');
     }
@@ -1008,70 +1053,76 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
     #undef TRY_WRITE
 }
 
-void DecachingFile::prepare_patch_objc_methods(uint32_t method_vmaddr) {
+void DecachingFile::prepare_patch_objc_methods(uint32_t method_vmaddr, uint32_t override_vmaddr) {
     if (!method_vmaddr)
         return;
     
     off_t method_offset = _context->from_vmaddr(method_vmaddr);
     _context->_f->seek(method_offset);
-    if (_context->_f->copy_data<uint32_t>() != sizeof(method_t))
-        _entsize12_patches.push_back(method_offset);
+    bool wrong_entsize = _context->_f->copy_data<uint32_t>() != sizeof(method_t);
     uint32_t count = _context->_f->copy_data<uint32_t>();
+    
+    if (!this->contains_address(method_vmaddr)) {
+        method_vmaddr = _extra_data.next_vmaddr();
+        size_t size = 8 + sizeof(method_t)*count;
+        _extra_data.insert(_context->_f->peek_data_at<char>(method_offset), size, override_vmaddr);
+    }
+    
+    if (wrong_entsize)
+        _entsize12_patches.push_back(method_vmaddr);
+        
     const method_t* methods = _context->_f->peek_data<method_t>();
     for (uint32_t j = 0; j < count; ++ j) {
         if (!this->contains_address(methods[j].name)) {
             const char* the_string = _context->peek_char_at_vmaddr(methods[j].name);
-            _extrastrs.insert(the_string, method_offset + 8 + sizeof(method_t)*j);
+            _extra_text.insert(the_string, method_vmaddr + 8 + sizeof(method_t)*j);
         }
     }
 }
 
-void DecachingFile::prepare_objc_extrastr(const load_command* cmd) {
-    if (cmd->cmd == LC_SEGMENT) {
-        const segment_command* segcmd = static_cast<const segment_command*>(cmd);
-        if (!strncmp(segcmd->segname, "__DATA", sizeof(segcmd->segname))) {
-            const section* sects = reinterpret_cast<const section*>(1 + segcmd);
-            for (uint32_t i = 0; i < segcmd->nsects; ++ i) {
-                const section& sect = sects[i];
-                if (!strncmp(sect.sectname, "__objc_selrefs", sizeof(sect.sectname))) {
-                    const uint32_t* refs = _context->_f->peek_data_at<uint32_t>(sect.offset);
-                    for (uint32_t j = 0; j < sect.size/4; ++ j) {
-                        if (!this->contains_address(refs[j])) {
-                            const char* the_string = _context->peek_char_at_vmaddr(refs[j]);
-                            _extrastrs.insert(the_string, sect.offset + 4*j);
-                        }
+void DecachingFile::prepare_objc_extrastr(const segment_command* segcmd) {
+    if (streq(segcmd->segname, "__DATA")) {
+        const section* sects = reinterpret_cast<const section*>(1 + segcmd);
+        for (uint32_t i = 0; i < segcmd->nsects; ++ i) {
+            const section& sect = sects[i];
+            if (streq(sect.sectname, "__objc_selrefs")) {
+                const uint32_t* refs = _context->_f->peek_data_at<uint32_t>(sect.offset);
+                for (uint32_t j = 0; j < sect.size/4; ++ j) {
+                    if (!this->contains_address(refs[j])) {
+                        const char* the_string = _context->peek_char_at_vmaddr(refs[j]);
+                        _extra_text.insert(the_string, sect.addr + 4*j);
                     }
-                } else if (!strncmp(sect.sectname, "__objc_classlist", sizeof(sect.sectname))) {
-                    const uint32_t* classes = _context->_f->peek_data_at<uint32_t>(sect.offset);
-                    for (uint32_t j = 0; j < sect.size/4; ++ j) {
-                        uint32_t class_vmaddr = classes[j];
-                        const class_t* class_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_vmaddr));
-                        const class_ro_t* class_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(class_obj->data));
-                        this->prepare_patch_objc_methods(class_data->baseMethods);
-                        const class_t* metaclass_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_obj->isa));
-                        const class_ro_t* metaclass_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(metaclass_obj->data));
-                        this->prepare_patch_objc_methods(metaclass_data->baseMethods);
-                    }
-                } else if (!strncmp(sect.sectname, "__objc_protolist", sizeof(sect.sectname))) {
-                    const uint32_t* protos = _context->_f->peek_data_at<uint32_t>(sect.offset);
-                    for (uint32_t j = 0; j < sect.size/4; ++ j) {
-                        uint32_t proto_vmaddr = protos[j];
-                        const protocol_t* proto_obj = reinterpret_cast<const protocol_t*>(_context->peek_char_at_vmaddr(proto_vmaddr));
-                        this->prepare_patch_objc_methods(proto_obj->instanceMethods);
-                        this->prepare_patch_objc_methods(proto_obj->classMethods);
-                        this->prepare_patch_objc_methods(proto_obj->optionalInstanceMethods);
-                        this->prepare_patch_objc_methods(proto_obj->optionalClassMethods);
-                    }
-                } else if (!strncmp(sect.sectname, "__objc_catlist", sizeof(sect.sectname))) {
-                    const uint32_t* cats = _context->_f->peek_data_at<uint32_t>(sect.offset);
-                    for (uint32_t j = 0; j < sect.size/4; ++ j) {
-                        uint32_t cat_vmaddr = cats[j];
-                        const category_t* cat_obj = reinterpret_cast<const category_t*>(_context->peek_char_at_vmaddr(cat_vmaddr));
-                        this->prepare_patch_objc_methods(cat_obj->instanceMethods);
-                        this->prepare_patch_objc_methods(cat_obj->classMethods);
-                    }
-                } 
-            }
+                }
+            } else if (streq(sect.sectname, "__objc_classlist")) {
+                const uint32_t* classes = _context->_f->peek_data_at<uint32_t>(sect.offset);
+                for (uint32_t j = 0; j < sect.size/4; ++ j) {
+                    uint32_t class_vmaddr = classes[j];
+                    const class_t* class_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_vmaddr));
+                    const class_ro_t* class_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(class_obj->data));
+                    this->prepare_patch_objc_methods(class_data->baseMethods, class_obj->data + offsetof(class_ro_t, baseMethods));
+                    const class_t* metaclass_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_obj->isa));
+                    const class_ro_t* metaclass_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(metaclass_obj->data));
+                    this->prepare_patch_objc_methods(metaclass_data->baseMethods, metaclass_obj->data + offsetof(class_ro_t, baseMethods));
+                }
+            } else if (streq(sect.sectname, "__objc_protolist")) {
+                const uint32_t* protos = _context->_f->peek_data_at<uint32_t>(sect.offset);
+                for (uint32_t j = 0; j < sect.size/4; ++ j) {
+                    uint32_t proto_vmaddr = protos[j];
+                    const protocol_t* proto_obj = reinterpret_cast<const protocol_t*>(_context->peek_char_at_vmaddr(proto_vmaddr));
+                    this->prepare_patch_objc_methods(proto_obj->instanceMethods, proto_vmaddr + offsetof(protocol_t, instanceMethods));
+                    this->prepare_patch_objc_methods(proto_obj->classMethods, proto_vmaddr + offsetof(protocol_t, classMethods));
+                    this->prepare_patch_objc_methods(proto_obj->optionalInstanceMethods, proto_vmaddr + offsetof(protocol_t, optionalInstanceMethods));
+                    this->prepare_patch_objc_methods(proto_obj->optionalClassMethods, proto_vmaddr + offsetof(protocol_t, optionalClassMethods));
+                }
+            } else if (streq(sect.sectname, "__objc_catlist")) {
+                const uint32_t* cats = _context->_f->peek_data_at<uint32_t>(sect.offset);
+                for (uint32_t j = 0; j < sect.size/4; ++ j) {
+                    uint32_t cat_vmaddr = cats[j];
+                    const category_t* cat_obj = reinterpret_cast<const category_t*>(_context->peek_char_at_vmaddr(cat_vmaddr));
+                    this->prepare_patch_objc_methods(cat_obj->instanceMethods, cat_vmaddr + offsetof(category_t, instanceMethods));
+                    this->prepare_patch_objc_methods(cat_obj->classMethods, cat_vmaddr + offsetof(category_t, classMethods));
+                }
+            } 
         }
     }
 }
