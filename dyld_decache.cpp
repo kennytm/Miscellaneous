@@ -418,7 +418,7 @@ public:
 
 // This class represents one file going to be decached.
 // Decaching is performed in several phases:
-//  1. Search for all Objective-C selectors and methods that point outside of 
+//  1. Search for all Objective-C selectors and methods that point outside of
 //     this library, and put this into an ExtraStringRepository.
 //  2. Write out the __TEXT and __DATA segments, including the data from the
 //     ExtraStringRepository.
@@ -426,11 +426,11 @@ public:
 //     relevant parts of global __LINKEDIT segment and copy them to the output
 //     file.
 //  4. Revisit the output file to fix the file offsets. All file offsets were
-//     originally pointing to locations in the cache file, but in the decached 
+//     originally pointing to locations in the cache file, but in the decached
 //     file these will be no longer meaningful if not fixed.
 //  5. Append the extra 'section' header to the corresponding segments, if there
 //     are external Objective-C selectors or methods.
-//  6. Go through the Objective-C sections and rewire the external references. 
+//  6. Go through the Objective-C sections and rewire the external references.
 class DecachingFile {
     struct FileoffFixup {
         uint32_t sourceBegin;
@@ -772,7 +772,7 @@ private:
         const char* progname = path ? strrchr(path, '/')+1 : "dyld_decache";
         printf(
             "Usage:\n"
-            "  %s [-p] [-o folder] [-l] [-f name ...] dyld_shared_cache_armv7\n"
+            "  %s [-p] [-o folder] [-f name ...] path/to/dyld_shared_cache_armvX\n"
             "\n"
             "Options:\n"
             "  -o folder : Extract files into 'folder'. Default to ./libraries\n"
@@ -1029,7 +1029,7 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
         }
 
         case LC_SYMTAB: {
-            // The string table is shared by all library, so naively using 
+            // The string table is shared by all library, so naively using
             //  TRY_WRITE will create a huge file with lots of unnecessary
             //  strings. Therefore, we have to scan through all symbols and only
             //  take those strings which are used by the symbol.
