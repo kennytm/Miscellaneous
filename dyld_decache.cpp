@@ -81,7 +81,7 @@ struct dyld_cache_header {
 typedef uint64_t		mach_vm_address_t;
 typedef uint64_t		mach_vm_offset_t;
 typedef uint64_t		mach_vm_size_t;
-typedef int vm_prot_t;
+typedef int32_t vm_prot_t;
 
 struct shared_file_mapping_np {
 	mach_vm_address_t	sfm_address;
@@ -99,7 +99,7 @@ struct dyld_cache_image_info {
 	uint32_t	pad;
 };
 
-typedef int			integer_t;
+typedef int32_t		integer_t;
 typedef integer_t	cpu_type_t;
 typedef integer_t	cpu_subtype_t;
 
@@ -285,6 +285,52 @@ struct nlist {
 	uint32_t n_value;
 };
 
+struct class_t {
+    uint32_t isa;
+    uint32_t superclass;
+    uint32_t cache;
+    uint32_t vtable;
+    uint32_t data;
+};
+
+struct class_ro_t {
+    uint32_t flags;
+    uint32_t instanceStart;
+    uint32_t instanceSize;
+    uint32_t ivarLayout;
+    uint32_t name;
+    uint32_t baseMethods;
+    uint32_t baseProtocols;
+    uint32_t ivars;
+    uint32_t weakIvarLayout;
+    uint32_t baseProperties;
+};
+
+struct method_t {
+    uint32_t name;
+    uint32_t types;
+    uint32_t imp;
+};
+
+struct protocol_t {
+    uint32_t isa;
+    uint32_t name;
+    uint32_t protocols;
+    uint32_t instanceMethods;
+    uint32_t classMethods;
+    uint32_t optionalInstanceMethods;
+    uint32_t optionalClassMethods;
+    uint32_t instanceProperties;
+};
+
+struct category_t {
+    uint32_t name;
+    uint32_t cls;
+    uint32_t instanceMethods;
+    uint32_t classMethods;
+    uint32_t protocols;
+    uint32_t instanceProperties;
+};
 
 //------------------------------------------------------------------------------
 // END THIRD-PARTY STRUCTURES
@@ -322,7 +368,7 @@ class DecachingFile {
     struct SegmentVMRange {
         uint32_t begin, end;
     };
-    
+        
     struct {
         long rebase_off, bind_off, weak_bind_off,
                lazy_bind_off, export_off,            // dyld_info
@@ -341,6 +387,7 @@ class DecachingFile {
     size_t _extrastr_len;
     std::vector<ObjcExtraString> _extrastrs;
     std::vector<SegmentVMRange> _segment_vm_ranges;
+    std::vector<off_t> _entsize12_patches;
     
     void open_file(const std::string& filename) {
         _f = fopen_and_create_missing_dirs(filename);
@@ -387,7 +434,7 @@ class DecachingFile {
     void fix_file_offsets(const load_command* cmd) {
         switch (cmd->cmd) {
             default:
-                fseek(_f, cmd->cmdsize, SEEK_CUR);
+                fwrite(cmd, cmd->cmdsize, 1, _f);
                 putchar_and_flush('+');
                 break;
                 
@@ -421,9 +468,15 @@ class DecachingFile {
                         sects[segcmd.nsects].flags = 2; // S_CSTRING_LITERALS
                         sects[segcmd.nsects].reserved1 = 0;
                         sects[segcmd.nsects].reserved2 = 0;
+                        segcmd.cmdsize += sizeof(section);
                         segcmd.vmsize += _extrastr_len;
                         segcmd.filesize += _extrastr_len;
                         segcmd.nsects += 1;
+                        long curloc = ftell(_f);
+                        fseek(_f, offsetof(mach_header, sizeofcmds), SEEK_SET);
+                        uint32_t new_sizeofcmds = _header->sizeofcmds + sizeof(section);
+                        fwrite(&new_sizeofcmds, sizeof(new_sizeofcmds), 1, _f);
+                        fseek(_f, curloc, SEEK_SET);
                     }
                     fwrite(&segcmd, sizeof(segcmd), 1, _f);
                     fwrite(sects, sizeof(*sects), segcmd.nsects, _f);
@@ -529,6 +582,7 @@ class DecachingFile {
         return false;
     }
     
+    void prepare_patch_objc_methods(uint32_t method_vmaddr);
     void prepare_objc_extrastr(const load_command* cmd);
     
 public:
@@ -547,7 +601,7 @@ public:
             return;
         
         this->foreach_command(&DecachingFile::retrieve_segment_vm_ranges);
-//      this->foreach_command(&DecachingFile::prepare_objc_extrastr);
+        this->foreach_command(&DecachingFile::prepare_objc_extrastr);
         
         this->foreach_command(&DecachingFile::write_segment_content_proxy);
         
@@ -780,6 +834,19 @@ void DecachingFile::write_segment_content(const segment_command* cmd) {
         FileoffFixup fixup = {cmd->fileoff, cmd->fileoff + cmd->filesize, cmd->fileoff - new_fileoff};
         _fixups.push_back(fixup);
         putchar_and_flush('w');
+        
+        if (!strncmp(cmd->segname, "__TEXT", sizeof(cmd->segname))) {
+            for (std::vector<ObjcExtraString>::iterator it = _extrastrs.begin(); it != _extrastrs.end(); ++ it) {
+                it->new_address = ftell(_f) + cmd->vmaddr - new_fileoff;
+                fwrite(it->string, it->entry_size, 1, _f);
+            }
+        }
+        long extra = ftell(_f) % 8;
+        if (extra) {
+            char padding[8] = {0};
+            fwrite(padding, 1, 8-extra, _f);
+            _extrastr_len += 8-extra;
+        }
     }
 }
 
@@ -866,6 +933,32 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
     #undef TRY_WRITE
 }
 
+void DecachingFile::prepare_patch_objc_methods(uint32_t method_vmaddr) {
+    if (!method_vmaddr)
+        return;
+    
+    off_t method_offset = _context->from_vmaddr(method_vmaddr);
+    _context->_f->seek(method_offset);
+    if (_context->_f->copy_data<uint32_t>() != sizeof(method_t))
+        _entsize12_patches.push_back(method_offset);
+    uint32_t count = _context->_f->copy_data<uint32_t>();
+    const method_t* methods = _context->_f->peek_data<method_t>();
+    for (uint32_t j = 0; j < count; ++ j) {
+        if (!this->contains_address(methods[j].name)) {
+            const char* the_string = _context->peek_char_at_vmaddr(methods[j].name);
+            ObjcExtraString extrastr = {
+                the_string,
+                strlen(the_string) + 1,
+                methods[j].name,
+                0,
+                method_offset + 8 + sizeof(method_t)*j
+            };
+            _extrastrs.push_back(extrastr);
+            _extrastr_len += extrastr.entry_size;
+        }
+    }
+}
+
 void DecachingFile::prepare_objc_extrastr(const load_command* cmd) {
     if (cmd->cmd == LC_SEGMENT) {
         const segment_command* segcmd = static_cast<const segment_command*>(cmd);
@@ -889,8 +982,33 @@ void DecachingFile::prepare_objc_extrastr(const load_command* cmd) {
                             _extrastr_len += extrastr.entry_size;
                         }
                     }
-                } /*else if (!strncmp()) {
-                }*/
+                } else if (!strncmp(sect.sectname, "__objc_classlist", sizeof(sect.sectname))) {
+                    const uint32_t* classes = _context->_f->peek_data_at<uint32_t>(sect.offset);
+                    for (uint32_t j = 0; j < sect.size/4; ++ j) {
+                        uint32_t class_vmaddr = classes[j];
+                        const class_t* class_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_vmaddr));
+                        const class_ro_t* class_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(class_obj->data));
+                        this->prepare_patch_objc_methods(class_data->baseMethods);
+                    }
+                } else if (!strncmp(sect.sectname, "__objc_protolist", sizeof(sect.sectname))) {
+                    const uint32_t* protos = _context->_f->peek_data_at<uint32_t>(sect.offset);
+                    for (uint32_t j = 0; j < sect.size/4; ++ j) {
+                        uint32_t proto_vmaddr = protos[j];
+                        const protocol_t* proto_obj = reinterpret_cast<const protocol_t*>(_context->peek_char_at_vmaddr(proto_vmaddr));
+                        this->prepare_patch_objc_methods(proto_obj->instanceMethods);
+                        this->prepare_patch_objc_methods(proto_obj->classMethods);
+                        this->prepare_patch_objc_methods(proto_obj->optionalInstanceMethods);
+                        this->prepare_patch_objc_methods(proto_obj->optionalClassMethods);
+                    }
+                } else if (!strncmp(sect.sectname, "__objc_catlist", sizeof(sect.sectname))) {
+                    const uint32_t* cats = _context->_f->peek_data_at<uint32_t>(sect.offset);
+                    for (uint32_t j = 0; j < sect.size/4; ++ j) {
+                        uint32_t cat_vmaddr = cats[j];
+                        const category_t* cat_obj = reinterpret_cast<const category_t*>(_context->peek_char_at_vmaddr(cat_vmaddr));
+                        this->prepare_patch_objc_methods(cat_obj->instanceMethods);
+                        this->prepare_patch_objc_methods(cat_obj->classMethods);
+                    }
+                } 
             }
         }
     }
