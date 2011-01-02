@@ -338,12 +338,6 @@ struct category_t {
 // END THIRD-PARTY STRUCTURES
 //------------------------------------------------------------------------------
 
-static FILE* fopen_and_create_missing_dirs(const std::string& filename) {
-    boost::filesystem::path path (filename);
-    boost::filesystem::create_directories(path.parent_path());
-    return fopen(filename.c_str(), "wb");
-}
-
 static bool streq(const char x[16], const char* y) {
     return strncmp(x, y, 16) == 0;
 } 
@@ -453,8 +447,9 @@ private:
     
 private:
     
-    void open_file(const std::string& filename) {
-        _f = fopen_and_create_missing_dirs(filename);
+    void open_file(const boost::filesystem::path& filename) {
+        boost::filesystem::create_directories(filename.parent_path());
+        _f = fopen(filename.c_str(), "wb");
         if (!_f) {
             perror("Error");
             fprintf(stderr, "Error: Cannot write to '%s'.\n", filename.c_str());
@@ -683,7 +678,7 @@ private:
     }
     
 public:
-    DecachingFile(const std::string& filename, const mach_header* header, const ProgramContext* context) : 
+    DecachingFile(const boost::filesystem::path& filename, const mach_header* header, const ProgramContext* context) : 
         _imageinfo_address(0), _header(header), _context(context), 
         _extra_text("__TEXT", "__objc_extratxt", 2, 0),
         _extra_data("__DATA", "__objc_extradat", 0, 2)
@@ -736,6 +731,7 @@ class ProgramContext {
     bool _linkonly;
     bool _printmode;
     std::vector<std::pair<const char*, size_t> > _namefilters;
+    boost::unordered_map<const mach_header*, boost::filesystem::path> _already_dumped;
     
     const dyld_cache_header* _header;
     const shared_file_mapping_np* _mapping;
@@ -878,19 +874,45 @@ public:
     }
 
     
-    bool save_complete_image(uint32_t image_index) const {
-        std::string filename (_folder);
+    void save_complete_image(uint32_t image_index) {
+        boost::filesystem::path filename (_folder);
         const char* path = this->path_of_image(image_index);
-        filename += path;
-
-        printf("%3d/%d: Dumping '%s'...\n", image_index, _header->imagesCount, path);
-
-        DecachingFile df (filename, this->mach_header_of_image(image_index), this);
+        filename /= path;
         
-        return df.is_open();
+        const mach_header* header = this->mach_header_of_image(image_index);        
+        boost::unordered_map<const mach_header*, boost::filesystem::path>::const_iterator cit = _already_dumped.find(header);
+
+        bool already_dumped = (cit != _already_dumped.end());
+        printf("%3d/%d: %sing '%s'...\n", image_index, _header->imagesCount, already_dumped ? "Link" : "Dump", path);
+        
+        if (already_dumped) {
+            boost::system::error_code ec;
+            boost::filesystem::path src_path (path);
+            boost::filesystem::path target_path (".");
+            boost::filesystem::path::iterator it = src_path.begin();
+            ++ it;
+            ++ it;
+            for (; it != src_path.end(); ++ it) {
+                target_path /= "..";
+            }
+            target_path /= cit->second;
+            
+            boost::filesystem::remove(filename);
+            boost::filesystem::create_directories(filename.parent_path());
+            boost::filesystem::create_symlink(target_path, filename, ec);
+            if (ec)
+                fprintf(stderr, "**** Failed: %s\n", ec.message().c_str());
+                
+        } else {
+            _already_dumped.insert(std::make_pair(header, path));
+            DecachingFile df (filename, header, this);
+            if (!df.is_open())
+                perror("**** Failed");
+        }
+        
     }
     
-    void save_all_images() const {
+    void save_all_images() {
         for (uint32_t i = 0; i < _header->imagesCount; ++ i) {
             if (!this->should_skip_image(i)) {
                 this->save_complete_image(i);
