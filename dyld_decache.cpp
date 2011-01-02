@@ -68,6 +68,7 @@
 #define BOOST_FILESYSTEM_VERSION 3
 #include <boost/filesystem.hpp>
 #include <utility>
+#include <boost/unordered_map.hpp>
 
 struct dyld_cache_header {
 	char		magic[16];		
@@ -350,6 +351,51 @@ static void putchar_and_flush(char c) throw() {
 class ProgramContext;
 
 
+class ExtraStringRepository {
+    struct Entry {
+        size_t size;
+        uint32_t new_address;
+        std::vector<off_t> override_offsets;
+    };
+    
+    boost::unordered_map<const char*, Entry> _entries;
+    size_t _total_size;
+    
+public:
+    ExtraStringRepository() : _total_size(0) {}
+
+    void insert(const char* string, off_t override_offset) {
+        boost::unordered_map<const char*, Entry>::iterator it = _entries.find(string);
+        if (it != _entries.end()) {
+            it->second.override_offsets.push_back(override_offset);
+        } else {
+            Entry entry;
+            entry.size = strlen(string) + 1;
+            entry.new_address = 0;
+            entry.override_offsets.push_back(override_offset);
+            _entries.insert(std::make_pair(string, entry));
+            _total_size += entry.size;
+        }
+    }
+    
+    template <typename Object, typename T>
+    void foreach_entry(Object* self, T context, void (Object::*action)(T context, const char* string, size_t size, uint32_t& new_address, const std::vector<off_t>& override_offsets)) {
+        for (boost::unordered_map<const char*, Entry>::iterator it = _entries.begin(); it != _entries.end(); ++ it)
+            (self->*action)(context, it->first, it->second.size, it->second.new_address, it->second.override_offsets);
+    }
+    
+    template <typename Object, typename T>
+    void foreach_entry(const Object* self, T context, void (Object::*action)(T context, const char* string, size_t size, uint32_t new_address, const std::vector<off_t>& override_offsets) const) const {
+        for (boost::unordered_map<const char*, Entry>::const_iterator it = _entries.begin(); it != _entries.end(); ++ it)
+            (self->*action)(context, it->first, it->second.size, it->second.new_address, it->second.override_offsets);
+    }
+    
+    void increase_size_by(size_t delta) { _total_size += delta; }
+    size_t total_size() const { return _total_size; }
+    bool has_content() const { return _total_size != 0; }
+};
+
+
 class DecachingFile {
     struct FileoffFixup {
         uint32_t sourceBegin;
@@ -360,7 +406,6 @@ class DecachingFile {
     struct ObjcExtraString {
         const char* string;
         size_t entry_size;
-        uint32_t original_address;
         uint32_t new_address;
         off_t override_offset;
     };
@@ -384,8 +429,7 @@ class DecachingFile {
     const mach_header* _header;
     std::vector<FileoffFixup> _fixups;
     const ProgramContext* _context;
-    size_t _extrastr_len;
-    std::vector<ObjcExtraString> _extrastrs;
+    ExtraStringRepository _extrastrs;
     std::vector<SegmentVMRange> _segment_vm_ranges;
     std::vector<off_t> _entsize12_patches;
     
@@ -395,6 +439,11 @@ class DecachingFile {
             perror("Error");
             fprintf(stderr, "Error: Cannot write to '%s'.\n", filename.c_str());
         }
+    }
+    
+    void write_extrastr(long vmdelta, const char* string, size_t size, uint32_t& new_address, const std::vector<off_t>&) {
+        new_address = ftell(_f) + vmdelta;
+        fwrite(string, size, 1, _f);
     }
     
     void write_segment_content(const segment_command* cmd);
@@ -447,7 +496,7 @@ class DecachingFile {
                     fwrite(&segcmd, sizeof(segcmd), 1, _f);
                     putchar_and_flush('l');
                 } else {
-                    bool is_text = _extrastr_len && !strncmp(segcmd.segname, "__TEXT", sizeof(segcmd.segname));
+                    bool is_text = _extrastrs.has_content() && !strncmp(segcmd.segname, "__TEXT", sizeof(segcmd.segname));
                     
                     this->fix_offset(segcmd.fileoff);
                     section* sects = new section[segcmd.nsects + is_text];
@@ -460,7 +509,7 @@ class DecachingFile {
                         memcpy(sects[segcmd.nsects].sectname, "__objc_extrastr\0", 16);
                         memcpy(sects[segcmd.nsects].segname, "__TEXT\0\0\0\0\0\0\0\0\0\0", 16);
                         sects[segcmd.nsects].addr = segcmd.vmaddr + segcmd.vmsize;
-                        sects[segcmd.nsects].size = _extrastr_len;
+                        sects[segcmd.nsects].size = _extrastrs.total_size();
                         sects[segcmd.nsects].offset = segcmd.fileoff + segcmd.filesize;
                         sects[segcmd.nsects].reloff = 0;
                         sects[segcmd.nsects].nreloc = 0;
@@ -469,8 +518,8 @@ class DecachingFile {
                         sects[segcmd.nsects].reserved1 = 0;
                         sects[segcmd.nsects].reserved2 = 0;
                         segcmd.cmdsize += sizeof(section);
-                        segcmd.vmsize += _extrastr_len;
-                        segcmd.filesize += _extrastr_len;
+                        segcmd.vmsize += _extrastrs.total_size();
+                        segcmd.filesize += _extrastrs.total_size();
                         segcmd.nsects += 1;
                         long curloc = ftell(_f);
                         fseek(_f, offsetof(mach_header, sizeofcmds), SEEK_SET);
@@ -585,8 +634,30 @@ class DecachingFile {
     void prepare_patch_objc_methods(uint32_t method_vmaddr);
     void prepare_objc_extrastr(const load_command* cmd);
     
+    void patch_objc_sects_callback(int, const char* string, size_t, uint32_t new_address, const std::vector<off_t>& override_offsets) const {
+        for (std::vector<off_t>::const_iterator cit = override_offsets.begin(); cit != override_offsets.end(); ++ cit) {
+            off_t actual_offset = *cit;
+            this->fix_offset(actual_offset);
+            printf("%lx[%lx][%lx] = %s\n", actual_offset, *cit, new_address, string);
+            fseek(_f, actual_offset, SEEK_SET);
+            fwrite(&new_address, 4, 1, _f);
+        }
+    }
+    
+    void patch_objc_sects() const {
+        _extrastrs.foreach_entry(this, 0, &DecachingFile::patch_objc_sects_callback);
+        
+        const uint32_t twelve = sizeof(method_t);
+        for (std::vector<off_t>::const_iterator cit = _entsize12_patches.begin(); cit != _entsize12_patches.end(); ++ cit) {
+            off_t actual_offset = *cit;
+            this->fix_offset(actual_offset);
+            fseek(_f, actual_offset, SEEK_SET);
+            fwrite(&twelve, 4, 1, _f);
+        }
+    }
+    
 public:
-    DecachingFile(const std::string& filename, const mach_header* header, const ProgramContext* context) : _header(header), _context(context), _extrastr_len(0) {
+    DecachingFile(const std::string& filename, const mach_header* header, const ProgramContext* context) : _header(header), _context(context) {
         memset(&_new_linkedit_offsets, 0, sizeof(_new_linkedit_offsets));
         
         if (header->magic != 0xfeedface) {
@@ -611,6 +682,8 @@ public:
         
         fseek(_f, sizeof(*header), SEEK_SET);
         this->foreach_command(&DecachingFile::fix_file_offsets);
+        
+        this->patch_objc_sects();
     }
     
     ~DecachingFile() {
@@ -825,28 +898,30 @@ public:
     friend class DecachingFile;
 };
 
+
 void DecachingFile::write_segment_content(const segment_command* cmd) {
     const char* data_ptr = _context->peek_char_at_vmaddr(cmd->vmaddr);
     long new_fileoff = ftell(_f);
     if (strncmp(cmd->segname, "__LINKEDIT", sizeof(cmd->segname))) {
         fwrite(data_ptr, 1, cmd->filesize, _f);
+        uint32_t filesize = cmd->filesize;
     
-        FileoffFixup fixup = {cmd->fileoff, cmd->fileoff + cmd->filesize, cmd->fileoff - new_fileoff};
+        if (!strncmp(cmd->segname, "__TEXT", sizeof(cmd->segname))) {
+            long vmdelta = cmd->vmaddr - new_fileoff;
+            _extrastrs.foreach_entry(this, vmdelta, &DecachingFile::write_extrastr);
+            
+            long extra = ftell(_f) % 8;
+            if (extra) {
+                char padding[8] = {0};
+                fwrite(padding, 1, 8-extra, _f);
+                _extrastrs.increase_size_by(8-extra);
+            }
+            filesize += _extrastrs.total_size();
+        }
+        
+        FileoffFixup fixup = {cmd->fileoff, cmd->fileoff + filesize, cmd->fileoff - new_fileoff};
         _fixups.push_back(fixup);
         putchar_and_flush('w');
-        
-        if (!strncmp(cmd->segname, "__TEXT", sizeof(cmd->segname))) {
-            for (std::vector<ObjcExtraString>::iterator it = _extrastrs.begin(); it != _extrastrs.end(); ++ it) {
-                it->new_address = ftell(_f) + cmd->vmaddr - new_fileoff;
-                fwrite(it->string, it->entry_size, 1, _f);
-            }
-        }
-        long extra = ftell(_f) % 8;
-        if (extra) {
-            char padding[8] = {0};
-            fwrite(padding, 1, 8-extra, _f);
-            _extrastr_len += 8-extra;
-        }
     }
 }
 
@@ -946,15 +1021,7 @@ void DecachingFile::prepare_patch_objc_methods(uint32_t method_vmaddr) {
     for (uint32_t j = 0; j < count; ++ j) {
         if (!this->contains_address(methods[j].name)) {
             const char* the_string = _context->peek_char_at_vmaddr(methods[j].name);
-            ObjcExtraString extrastr = {
-                the_string,
-                strlen(the_string) + 1,
-                methods[j].name,
-                0,
-                method_offset + 8 + sizeof(method_t)*j
-            };
-            _extrastrs.push_back(extrastr);
-            _extrastr_len += extrastr.entry_size;
+            _extrastrs.insert(the_string, method_offset + 8 + sizeof(method_t)*j);
         }
     }
 }
@@ -971,15 +1038,7 @@ void DecachingFile::prepare_objc_extrastr(const load_command* cmd) {
                     for (uint32_t j = 0; j < sect.size/4; ++ j) {
                         if (!this->contains_address(refs[j])) {
                             const char* the_string = _context->peek_char_at_vmaddr(refs[j]);
-                            ObjcExtraString extrastr = {
-                                the_string,
-                                strlen(the_string) + 1,
-                                refs[j],
-                                0,
-                                sect.offset + 4*j
-                            };
-                            _extrastrs.push_back(extrastr);
-                            _extrastr_len += extrastr.entry_size;
+                            _extrastrs.insert(the_string, sect.offset + 4*j);
                         }
                     }
                 } else if (!strncmp(sect.sectname, "__objc_classlist", sizeof(sect.sectname))) {
@@ -989,6 +1048,9 @@ void DecachingFile::prepare_objc_extrastr(const load_command* cmd) {
                         const class_t* class_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_vmaddr));
                         const class_ro_t* class_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(class_obj->data));
                         this->prepare_patch_objc_methods(class_data->baseMethods);
+                        const class_t* metaclass_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_obj->isa));
+                        const class_ro_t* metaclass_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(metaclass_obj->data));
+                        this->prepare_patch_objc_methods(metaclass_data->baseMethods);
                     }
                 } else if (!strncmp(sect.sectname, "__objc_protolist", sizeof(sect.sectname))) {
                     const uint32_t* protos = _context->_f->peek_data_at<uint32_t>(sect.offset);
