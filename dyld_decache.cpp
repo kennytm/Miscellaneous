@@ -445,6 +445,7 @@ class DecachingFile {
 private:
     
     uint32_t _linkedit_offset, _linkedit_size;
+    uint32_t _imageinfo_address, _imageinfo_replacement;
     
     FILE* _f;
     const mach_header* _header;
@@ -677,7 +678,7 @@ private:
     void patch_objc_sects_callback(const char*, size_t, uint32_t new_address, const std::vector<uint32_t>& override_addresses) const {
         BOOST_FOREACH(uint32_t vmaddr, override_addresses) {
             long actual_offset = this->from_new_vmaddr(vmaddr);
-            assert(actual_offset >= 0);
+//          assert(actual_offset >= 0);
             fseek(_f, actual_offset, SEEK_SET);
             fwrite(&new_address, 4, 1, _f);
         }
@@ -688,11 +689,17 @@ private:
         _extra_data.foreach_entry(this, &DecachingFile::patch_objc_sects_callback);
         
         this->patch_objc_sects_callback(NULL, 0, sizeof(method_t), _entsize12_patches);
+        
+        if (_imageinfo_address) {
+            long actual_offset = this->from_new_vmaddr(_imageinfo_address);
+            fseek(_f, actual_offset, SEEK_SET);
+            fwrite(&_imageinfo_replacement, 4, 1, _f);
+        }
     }
     
 public:
     DecachingFile(const std::string& filename, const mach_header* header, const ProgramContext* context) : 
-        _header(header), _context(context),
+        _imageinfo_address(0), _header(header), _context(context), 
         _extra_text("__TEXT", "__objc_extratxt", 2, 0),
         _extra_data("__DATA", "__objc_extradat", 0, 2)
     {
@@ -1122,7 +1129,11 @@ void DecachingFile::prepare_objc_extrastr(const segment_command* segcmd) {
                     this->prepare_patch_objc_methods(cat_obj->instanceMethods, cat_vmaddr + offsetof(category_t, instanceMethods));
                     this->prepare_patch_objc_methods(cat_obj->classMethods, cat_vmaddr + offsetof(category_t, classMethods));
                 }
-            } 
+            } else if (streq(sect.sectname, "__objc_imageinfo")) {
+                _imageinfo_address = sect.addr + 4;
+                uint32_t original_flag = *reinterpret_cast<const uint32_t*>(_context->peek_char_at_vmaddr(_imageinfo_address));
+                _imageinfo_replacement = original_flag & ~8;
+            }
         }
     }
 }
