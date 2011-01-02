@@ -728,7 +728,6 @@ class ProgramContext {
     const char* _folder;
     char* _filename;
     DataFile* _f;
-    bool _linkonly;
     bool _printmode;
     std::vector<std::pair<const char*, size_t> > _namefilters;
     boost::unordered_map<const mach_header*, boost::filesystem::path> _already_dumped;
@@ -742,7 +741,6 @@ public:
         _folder("libraries"),
         _filename(NULL),
         _f(NULL),
-        _linkonly(false),
         _printmode(false)
     {}
 
@@ -755,14 +753,11 @@ private:
             "\n"
             "Options:\n"
             "  -o folder : Extract files into 'folder'. Default to ./libraries\n"
-            "  -l        : Extract for linking only. The __TEXT and __DATA\n"
-            "              segments will not be included, and all target will be\n"
-            "              soft-linked to a common file.\n"
             "  -p        : Print the content of the cache file and exit.\n"
             "  -f name   : Only extract the file which _ends_ with 'name'. This\n"
             "              option may be specified multiple times to extract\n"
             "              more than one file. If not specified, all files will\n"
-            "              be extracted."
+            "              be extracted.\n"
         , progname);
     }
 
@@ -773,9 +768,6 @@ private:
             switch (opt) {
                 case 'o':
                     _folder = optarg;
-                    break;
-                case 'l':
-                    _linkonly = true;
                     break;
                 case 'p':
                     _printmode = true;
@@ -853,7 +845,6 @@ public:
     }
     
     bool is_print_mode() const { return _printmode; }
-    bool is_link_mode() const { return _linkonly; }
         
     const char* path_of_image(uint32_t i) const {
         return _f->peek_data_at<char>(_images[i].pathFileOffset);
