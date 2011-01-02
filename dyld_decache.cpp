@@ -344,11 +344,6 @@ static FILE* fopen_and_create_missing_dirs(const std::string& filename) {
     return fopen(filename.c_str(), "wb");
 }
 
-static void putchar_and_flush(char c) throw() {
-    putchar(c);
-    fflush(stdout);
-}
-
 static bool streq(const char x[16], const char* y) {
     return strncmp(x, y, 16) == 0;
 } 
@@ -518,7 +513,6 @@ private:
         switch (cmd->cmd) {
             default:
                 fwrite(cmd, cmd->cmdsize, 1, _f);
-                putchar_and_flush('+');
                 break;
                 
             case LC_SEGMENT: {
@@ -528,7 +522,6 @@ private:
                     segcmd.fileoff = _linkedit_offset;
                     segcmd.filesize = _linkedit_size;
                     fwrite(&segcmd, sizeof(segcmd), 1, _f);
-                    putchar_and_flush('l');
                 } else {
                     const ExtraStringRepository* extra_repo = this->repo_for_segname(segcmd.segname);
                     bool has_extra_sect = extra_repo && extra_repo->has_content();
@@ -550,7 +543,6 @@ private:
                     }
                     fwrite(&segcmd, sizeof(segcmd), 1, _f);
                     fwrite(sects, sizeof(*sects), segcmd.nsects, _f);
-                    putchar_and_flush('s');
                     delete[] sects;
                 }
                 _new_segments.push_back(segcmd);
@@ -563,7 +555,6 @@ private:
                 symcmd.stroff = _new_linkedit_offsets.stroff;
                 symcmd.strsize = _new_linkedit_offsets.strsize;
                 fwrite(&symcmd, sizeof(symcmd), 1, _f);
-                putchar_and_flush('y');
                 break;
             }
                         
@@ -576,7 +567,6 @@ private:
                 dycmd.extreloff = _new_linkedit_offsets.extreloff;
                 dycmd.locreloff = _new_linkedit_offsets.locreloff;
                 fwrite(&dycmd, sizeof(dycmd), 1, _f);
-                putchar_and_flush('d');
                 break;
             }
             
@@ -584,7 +574,6 @@ private:
                 twolevel_hints_command tlcmd = *static_cast<const twolevel_hints_command*>(cmd);
                 this->fix_offset(tlcmd.offset);
                 fwrite(&tlcmd, sizeof(tlcmd), 1, _f);
-                putchar_and_flush('t');
                 break;
             }
             
@@ -601,7 +590,6 @@ private:
                 }
                 fwrite(sects, sizeof(*sects), segcmd.nsects, _f);
                 delete[] sects;
-                putchar_and_flush('s');
                 break;
             }
             */
@@ -611,7 +599,6 @@ private:
                 linkedit_data_command ldcmd = *static_cast<const linkedit_data_command*>(cmd);
                 this->fix_offset(ldcmd.dataoff);
                 fwrite(&ldcmd, sizeof(ldcmd), 1, _f);
-                putchar_and_flush('c');
                 break;
             }
             
@@ -619,7 +606,6 @@ private:
                 encryption_info_command eicmd = *static_cast<const encryption_info_command*>(cmd);
                 this->fix_offset(eicmd.cryptoff);
                 fwrite(&eicmd, sizeof(eicmd), 1, _f);
-                putchar_and_flush('e');
                 break;
             }
 
@@ -632,7 +618,6 @@ private:
                 dicmd.lazy_bind_off = _new_linkedit_offsets.lazy_bind_off;
                 dicmd.export_off = _new_linkedit_offsets.export_off;
                 fwrite(&dicmd, sizeof(dicmd), 1, _f);
-                putchar_and_flush('i');
                 break;
             }
         }
@@ -898,11 +883,9 @@ public:
         const char* path = this->path_of_image(image_index);
         filename += path;
 
-        printf("Dumping '%s' (%d/%d)\n... ", path, image_index, _header->imagesCount);
+        printf("%3d/%d: Dumping '%s'...\n", image_index, _header->imagesCount, path);
 
         DecachingFile df (filename, this->mach_header_of_image(image_index), this);
-        
-        printf("\n");
         
         return df.is_open();
     }
@@ -973,14 +956,13 @@ void DecachingFile::write_segment_content(const segment_command* segcmd) {
         
         FileoffFixup fixup = {segcmd->fileoff, segcmd->fileoff + filesize, segcmd->fileoff - new_fileoff};
         _fixups.push_back(fixup);
-        putchar_and_flush('w');
     }
 }
 
 void DecachingFile::write_real_linkedit(const load_command* cmd) {
     const unsigned char* data_ptr = _context->_f->data();
     
-    #define TRY_WRITE(offmem, countmem, objsize, ch) \
+    #define TRY_WRITE(offmem, countmem, objsize) \
         if (cmdvar->offmem && cmdvar->countmem) { \
             long curloc = ftell(_f); \
             long extra = curloc % objsize; \
@@ -991,7 +973,6 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
             } \
             _new_linkedit_offsets.offmem = curloc; \
             fwrite(cmdvar->offmem + data_ptr, cmdvar->countmem * objsize, 1, _f); \
-            putchar_and_flush(ch); \
         }
     
     switch (cmd->cmd) {
@@ -1001,11 +982,11 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
         case LC_DYLD_INFO:
         case LC_DYLD_INFO_ONLY: {
             const dyld_info_command* cmdvar = static_cast<const dyld_info_command*>(cmd);
-            TRY_WRITE(rebase_off, rebase_size, 1, 'R');
-            TRY_WRITE(bind_off, bind_size, 1, 'B');
-            TRY_WRITE(weak_bind_off, weak_bind_size, 1, 'W');
-            TRY_WRITE(lazy_bind_off, lazy_bind_size, 1, 'L');
-            TRY_WRITE(export_off, export_size, 1, 'X');
+            TRY_WRITE(rebase_off, rebase_size, 1);
+            TRY_WRITE(bind_off, bind_size, 1);
+            TRY_WRITE(weak_bind_off, weak_bind_size, 1);
+            TRY_WRITE(lazy_bind_off, lazy_bind_size, 1);
+            TRY_WRITE(export_off, export_size, 1);
             break;
         }
         
@@ -1026,7 +1007,6 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
                     cur_strx += entry_len;
                 }
                 _new_linkedit_offsets.strsize = cur_strx;
-                putchar_and_flush('S');
                 
                 long curloc = ftell(_f);
                 long extra = curloc % sizeof(nlist);
@@ -1039,7 +1019,6 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
                 fwrite(syms, cmdvar->nsyms, sizeof(nlist), _f);
                 
                 delete[] syms;
-                putchar_and_flush('Y');
             }
 
             break;
@@ -1047,12 +1026,12 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
         
         case LC_DYSYMTAB: {
             const dysymtab_command* cmdvar = static_cast<const dysymtab_command*>(cmd);
-            TRY_WRITE(tocoff, ntoc, 8, 'T');
-            TRY_WRITE(modtaboff, nmodtab, 52, 'M');
-            TRY_WRITE(extrefsymoff, nextrefsyms, 4, 'F');
-            TRY_WRITE(indirectsymoff, nindirectsyms, 4, 'I');
-            TRY_WRITE(extreloff, nextrel, 8, 'E');
-            TRY_WRITE(locreloff, nlocrel, 8, 'C');
+            TRY_WRITE(tocoff, ntoc, 8);
+            TRY_WRITE(modtaboff, nmodtab, 52);
+            TRY_WRITE(extrefsymoff, nextrefsyms, 4);
+            TRY_WRITE(indirectsymoff, nindirectsyms, 4);
+            TRY_WRITE(extreloff, nextrel, 8);
+            TRY_WRITE(locreloff, nlocrel, 8);
             break;
         }
     }
