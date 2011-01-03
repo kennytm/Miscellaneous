@@ -4,7 +4,7 @@ Miscellaneous
 This repository contains stuff which would be helpful for jailbroken iOS
 development.
 
-[`fixobjc2.idc`](https://github.com/kennytm/Miscellaneous/blob/master/fixobjc2.idc)
+[fixobjc2.idc](https://github.com/kennytm/Miscellaneous/blob/master/fixobjc2.idc)
 --------------
 
 This is a script to simply studying of Mach-O files on ARM architecture using
@@ -21,8 +21,8 @@ Currently, the script mainly does the following:
  
  * Add name to all ivars and classes.
 
-`dyld_decache`
---------------
+dyld_decache
+------------
 
 Starting from iPhone OS 3.1, the individual libraries files supplied by the
 system are smashed together into a giant cache file (`dyld_shared_cache_armvX`)
