@@ -960,7 +960,7 @@ class ProgramContext {
     char* _filename;
     DataFile* _f;
     bool _printmode;
-    std::vector<std::pair<const char*, size_t> > _namefilters;
+    std::vector<boost::filesystem::path> _namefilters;
     boost::unordered_map<const mach_header*, boost::filesystem::path> _already_dumped;
 
     const dyld_cache_header* _header;
@@ -980,16 +980,17 @@ private:
     void print_usage(char* path) const {
         const char* progname = path ? strrchr(path, '/')+1 : "dyld_decache";
         printf(
+            "dyld_decache v0.1\n"
             "Usage:\n"
-            "  %s [-p] [-o folder] [-f name ...] path/to/dyld_shared_cache_armvX\n"
+            "  %s [-p] [-o folder] [-f name [-f name] ...] path/to/dyld_shared_cache_armvX\n"
             "\n"
             "Options:\n"
-            "  -o folder : Extract files into 'folder'. Default to ./libraries\n"
+            "  -o folder : Extract files into 'folder'. Default to './libraries'\n"
             "  -p        : Print the content of the cache file and exit.\n"
-            "  -f name   : Only extract the file which _ends_ with 'name'. This\n"
-            "              option may be specified multiple times to extract\n"
-            "              more than one file. If not specified, all files will\n"
-            "              be extracted.\n"
+            "  -f name   : Only extract the file with filename 'name', e.g. '-f UIKit' or\n"
+            "              '-f liblockdown'. This option may be specified multiple times to\n"
+            "              extract more than one file. If not specified, all files will be\n"
+            "              extracted.\n"
         , progname);
     }
 
@@ -1005,7 +1006,7 @@ private:
                     _printmode = true;
                     break;
                 case 'f':
-                    _namefilters.push_back(std::make_pair(optarg, strlen(optarg)));
+                    _namefilters.push_back(boost::filesystem::path(optarg).stem());
                     break;
                 case '?':
                 case -1:
@@ -1124,10 +1125,10 @@ public:
         const char* path = this->path_of_image(i);
         if (_namefilters.empty())
             return false;
-        size_t path_length = strlen(path);
-
-        for (std::vector<std::pair<const char*, size_t> >::const_iterator cit = _namefilters.begin(); cit != _namefilters.end(); ++ cit) {
-            if (!strncmp(path + path_length - cit->second, cit->first, cit->second))
+            
+        boost::filesystem::path stem = boost::filesystem::path(path).stem();
+        BOOST_FOREACH(const boost::filesystem::path& filt, _namefilters) {
+            if (stem == filt)
                 return false;
         }
 
