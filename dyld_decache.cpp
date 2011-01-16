@@ -526,20 +526,22 @@ public:
                 BOOST_FOREACH(P offset, entry->replace_offsets) {
                     if (offset.first != segnum) {
                         segnum = offset.first;
-                        last_offset = offset.second;
+                        last_offset = offset.second + 4;
                         fputc(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | segnum, f);
-                        size += 1 + write_uleb128(f, last_offset);
+                        size += 1 + write_uleb128(f, offset.second);
                     } else {
                         uint32_t delta = offset.second - last_offset;
-                        unsigned imm_scale = delta % 4 == 0 ? delta / 4 - 1 : ~0u;
-                        if (imm_scale < 0x10u) {
+                        unsigned imm_scale = delta % 4 == 0 ? delta / 4 : ~0u;
+                        if (imm_scale == 0) {
+                            fputc(BIND_OPCODE_DO_BIND, f);
+                        } else if (imm_scale < 0x10u) {
                             fputc(BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED | imm_scale, f);
-                            ++ size;
                         } else {
                             fputc(BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB, f);
-                            size += 1 + write_uleb128(f, delta);
+                            size += write_uleb128(f, delta);
                         }
-                        last_offset = offset.second;
+                        ++ size;
+                        last_offset = offset.second + 4;
                     }
                 }
                 fputc(BIND_OPCODE_DO_BIND, f);
@@ -1439,6 +1441,7 @@ void DecachingFile::prepare_objc_extrastr(const segment_command* segcmd) {
                     this->prepare_patch_objc_methods(class_data->baseMethods, class_obj->data + offsetof(class_ro_t, baseMethods));
                     
                     const class_t* metaclass_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_obj->isa));
+                    this->add_extlink_to(metaclass_obj->isa, class_obj->isa + offsetof(class_t, isa));
                     this->add_extlink_to(metaclass_obj->superclass, class_obj->isa + offsetof(class_t, superclass));
                     const class_ro_t* metaclass_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(metaclass_obj->data));
                     this->prepare_patch_objc_methods(metaclass_data->baseMethods, metaclass_obj->data + offsetof(class_ro_t, baseMethods));
