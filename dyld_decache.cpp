@@ -1461,6 +1461,7 @@ void DecachingFile::prepare_objc_extrastr(const segment_command* segcmd) {
                 for (uint32_t j = 0; j < sect.size/4; ++ j) {
                     uint32_t cat_vmaddr = cats[j];
                     const category_t* cat_obj = reinterpret_cast<const category_t*>(_context->peek_char_at_vmaddr(cat_vmaddr));
+                    this->add_extlink_to(cat_obj->cls, cat_vmaddr + offsetof(category_t, cls));
                     this->prepare_patch_objc_methods(cat_obj->instanceMethods, cat_vmaddr + offsetof(category_t, instanceMethods));
                     this->prepare_patch_objc_methods(cat_obj->classMethods, cat_vmaddr + offsetof(category_t, classMethods));
                 }
@@ -1468,6 +1469,12 @@ void DecachingFile::prepare_objc_extrastr(const segment_command* segcmd) {
                 _imageinfo_address = sect.addr + 4;
                 uint32_t original_flag = *reinterpret_cast<const uint32_t*>(_context->peek_char_at_vmaddr(_imageinfo_address));
                 _imageinfo_replacement = original_flag & ~8;    // clear the OBJC_IMAGE_OPTIMIZED_BY_DYLD flag. (this chokes class-dump-3.3.3.)
+            } else if (streq(sect.sectname, "__objc_classrefs")) {
+                const uint32_t* refs = _context->_f->peek_data_at<uint32_t>(sect.offset);
+                uint32_t addr = sect.addr;
+                for (uint32_t j = 0; j < sect.size/4; ++ j, ++ refs, addr += 4) {
+                    this->add_extlink_to(*refs, addr);
+                }
             }
         }
     }
