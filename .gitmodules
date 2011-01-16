@@ -1,0 +1,3 @@
+[submodule "EcaFretni"]
+	path = EcaFretni
+	url = git@github.com:kennytm/EcaFretni.git
