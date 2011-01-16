@@ -48,13 +48,13 @@ The 64-bit `dyld_decache` for Mac OS X 10.6 can be downloaded from
 the options are:
 
     Usage:
-      dyld_decache [-p] [-o folder] [-f name ...] path/to/dyld_shared_cache_armvX
+      dyld_decache [-p] [-o folder] [-f name [-f name] ...] path/to/dyld_shared_cache_armvX
     
     Options:
-      -o folder : Extract files into 'folder'. Default to ./libraries
+      -o folder : Extract files into 'folder'. Default to './libraries'
       -p        : Print the content of the cache file and exit.
-      -f name   : Only extract the file which _ends_ with 'name'. This
-                  option may be specified multiple times to extract
-                  more than one file. If not specified, all files will
-                  be extracted.
+      -f name   : Only extract the file with filename 'name', e.g. '-f UIKit' or
+                  '-f liblockdown'. This option may be specified multiple times to
+                  extract more than one file. If not specified, all files will be
+                  extracted.
 
