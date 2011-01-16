@@ -159,6 +159,7 @@ struct load_command {
 #define	LC_ENCRYPTION_INFO 0x21
 #define	LC_DYLD_INFO 	0x22
 #define	LC_DYLD_INFO_ONLY (0x22|LC_REQ_DYLD)
+#define LC_LOAD_UPWARD_DYLIB (0x23|LC_REQ_DYLD)
 
 struct segment_command : public load_command {
 	char		segname[16];
@@ -275,6 +276,17 @@ struct dyld_info_command : public load_command {
     uint32_t   export_size;
 };
 
+struct dylib {
+    uint32_t name;
+    uint32_t timestamp;
+    uint32_t current_version;
+    uint32_t compatibility_version;
+};
+
+struct dylib_command : public load_command {
+    struct dylib dylib;
+};
+
 struct nlist {
 	int32_t n_strx;
 	uint8_t n_type;
@@ -330,6 +342,23 @@ struct category_t {
     uint32_t instanceProperties;
 };
 
+#define BIND_OPCODE_MASK					0xF0
+#define BIND_IMMEDIATE_MASK					0x0F
+#define BIND_OPCODE_DONE					0x00
+#define BIND_OPCODE_SET_DYLIB_ORDINAL_IMM			0x10
+#define BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB			0x20
+#define BIND_OPCODE_SET_DYLIB_SPECIAL_IMM			0x30
+#define BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM		0x40
+#define BIND_OPCODE_SET_TYPE_IMM				0x50
+#define BIND_OPCODE_SET_ADDEND_SLEB				0x60
+#define BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB			0x70
+#define BIND_OPCODE_ADD_ADDR_ULEB				0x80
+#define BIND_OPCODE_DO_BIND					0x90
+#define BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB			0xA0
+#define BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED			0xB0
+#define BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB		0xC0
+
+
 //------------------------------------------------------------------------------
 // END THIRD-PARTY STRUCTURES
 //------------------------------------------------------------------------------
@@ -339,6 +368,21 @@ struct category_t {
 static bool streq(const char x[16], const char* y) {
     return strncmp(x, y, 16) == 0;
 }
+
+static long write_uleb128(FILE* f, unsigned u) {
+    uint8_t buf[16];
+    int byte_count = 0;
+    while (u) {
+        buf[byte_count++] = u | 0x80;
+        u >>= 7;
+    }
+    buf[byte_count-1] &= ~0x80;
+    fwrite(buf, byte_count, sizeof(*buf), f);
+    return byte_count;
+}
+
+
+
 
 
 class ProgramContext;
@@ -416,6 +460,175 @@ public:
     uint32_t next_vmaddr() const { return _template.addr + _template.size; }
 };
 
+class ExtraBindRepository {
+    struct Entry {
+        std::string symname;
+        int libord;
+        std::vector<std::pair<int, uint32_t> > replace_offsets;
+    };
+    
+    boost::unordered_map<uint32_t, Entry> _entries;
+    
+public:
+    bool contains(uint32_t target_address) const {
+        return (_entries.find(target_address) != _entries.end());
+    }
+    
+    template <typename Object>
+    void insert(uint32_t target_address, std::pair<int, uint32_t> replace_offset, const Object* self, void (Object::*addr_info_getter)(uint32_t addr, std::string* p_symname, int* p_libord) const) {
+        boost::unordered_map<uint32_t, Entry>::iterator it = _entries.find(target_address);
+        if (it != _entries.end()) {
+            it->second.replace_offsets.push_back(replace_offset);
+        } else {
+            Entry entry;
+            entry.replace_offsets.push_back(replace_offset);
+            (self->*addr_info_getter)(target_address, &entry.symname, &entry.libord);
+            _entries.insert(std::make_pair(target_address, entry));
+        }
+    }
+    
+    long optimize_and_write(FILE* f) {
+        typedef boost::unordered_map<uint32_t, Entry>::value_type V;
+        typedef boost::unordered_map<int, std::vector<const Entry*> > M;
+        typedef std::pair<int, uint32_t> P;
+        
+        M entries_by_libord;
+        
+        BOOST_FOREACH(V& pair, _entries) {
+            Entry& entry = pair.second;
+            std::sort(entry.replace_offsets.begin(), entry.replace_offsets.end());
+            entries_by_libord[entry.libord].push_back(&entry);
+        }
+        
+        fputc(BIND_OPCODE_SET_TYPE_IMM | 1, f);
+        
+        long size = 1;
+        BOOST_FOREACH(const M::value_type& pair, entries_by_libord) {
+            int libord = pair.first;
+            if (libord < 0x10) {
+                unsigned char imm = libord & BIND_IMMEDIATE_MASK;
+                unsigned char opcode = libord < 0 ? BIND_OPCODE_SET_DYLIB_SPECIAL_IMM : BIND_OPCODE_SET_DYLIB_ORDINAL_IMM;
+                fputc(opcode | imm, f);
+                ++ size;
+            } else {
+                fputc(BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB, f);
+                size += 1 + write_uleb128(f, libord);
+            }
+            
+            BOOST_FOREACH(const Entry* entry, pair.second) {
+                size_t string_len = entry->symname.size();
+                size += string_len + 2;
+                fputc(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM, f);
+                fwrite(entry->symname.c_str(), string_len+1, 1, f);
+                
+                int segnum = -1;
+                uint32_t last_offset = 0;
+                BOOST_FOREACH(P offset, entry->replace_offsets) {
+                    if (offset.first != segnum) {
+                        segnum = offset.first;
+                        last_offset = offset.second;
+                        fputc(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | segnum, f);
+                        size += 1 + write_uleb128(f, last_offset);
+                    } else {
+                        uint32_t delta = offset.second - last_offset;
+                        unsigned imm_scale = delta % 4 == 0 ? delta / 4 - 1 : ~0u;
+                        if (imm_scale < 0x10u) {
+                            fputc(BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED | imm_scale, f);
+                            ++ size;
+                        } else {
+                            fputc(BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB, f);
+                            size += 1 + write_uleb128(f, delta);
+                        }
+                        last_offset = offset.second;
+                    }
+                }
+                fputc(BIND_OPCODE_DO_BIND, f);
+                ++ size;
+            }
+        }
+        
+        return size;
+    }
+};
+
+// A simple structure which only provides services related to VM address.
+class MachOFile {
+protected:
+    const mach_header* _header;
+    const ProgramContext* _context;
+    std::vector<const segment_command*> _segments;
+    uint32_t _image_vmaddr;
+    
+private:
+    boost::unordered_map<std::string, int> _libords;
+    int _cur_libord;
+    boost::unordered_map<uint32_t, std::string> _exports;
+
+protected:
+    template <typename T>
+    void foreach_command(void(T::*action)(const load_command* cmd)) {
+        const unsigned char* cur_cmd = reinterpret_cast<const unsigned char*>(_header + 1);
+
+        for (uint32_t i = 0; i < _header->ncmds; ++ i) {
+            const load_command* cmd = reinterpret_cast<const load_command*>(cur_cmd);
+            cur_cmd += cmd->cmdsize;
+
+            (static_cast<T*>(this)->*action)(cmd);
+        }
+    }
+
+    // Convert VM address to file offset of the decached file _before_ inserting
+    //  the extra sections.
+    long from_vmaddr(uint32_t vmaddr) const {
+        BOOST_FOREACH(const segment_command* segcmd, _segments) {
+            if (segcmd->vmaddr <= vmaddr && vmaddr < segcmd->vmaddr + segcmd->vmsize)
+                return vmaddr - segcmd->vmaddr + segcmd->fileoff;
+        }
+        return -1;
+    }
+
+private:
+    void retrieve_segments_and_libords(const load_command* cmd);
+
+public:
+    // Checks if the VM address is included in the decached file _before_
+    //  inserting the extra sections.
+    bool contains_address(uint32_t vmaddr) const {
+        BOOST_FOREACH(const segment_command* segcmd, _segments) {
+            if (segcmd->vmaddr <= vmaddr && vmaddr < segcmd->vmaddr + segcmd->vmsize)
+                return true;
+        }
+        return false;
+    }
+    
+    MachOFile(const mach_header* header, const ProgramContext* context, uint32_t image_vmaddr = 0)
+        : _header(header), _context(context), _image_vmaddr(image_vmaddr), _cur_libord(0)
+    {
+        if (header->magic != 0xfeedface)
+            return;
+
+        this->foreach_command(&MachOFile::retrieve_segments_and_libords);
+    }
+
+    const mach_header* header() const { return _header; }
+    
+    int libord_with_name(const char* libname) const {
+        boost::unordered_map<std::string, int>::const_iterator cit = _libords.find(libname); 
+        if (cit == _libords.end())
+            return 0;
+        else
+            return cit->second;
+    }
+    
+    std::string exported_symbol(uint32_t vmaddr) const {
+        boost::unordered_map<uint32_t, std::string>::const_iterator cit = _exports.find(vmaddr);
+        if (cit != _exports.end())
+            return cit->second;
+        else
+            return "";
+    }
+};
+
 // This class represents one file going to be decached.
 // Decaching is performed in several phases:
 //  1. Search for all Objective-C selectors and methods that point outside of
@@ -431,7 +644,7 @@ public:
 //  5. Append the extra 'section' header to the corresponding segments, if there
 //     are external Objective-C selectors or methods.
 //  6. Go through the Objective-C sections and rewire the external references.
-class DecachingFile {
+class DecachingFile : public MachOFile {
     struct FileoffFixup {
         uint32_t sourceBegin;
         uint32_t sourceEnd;
@@ -451,6 +664,7 @@ class DecachingFile {
              symoff, stroff,                         // symtab
              tocoff, modtaboff, extrefsymoff,
                indirectsymoff, extreloff, locreloff; // dysymtab
+        long bind_size;
         int32_t strsize;
     } _new_linkedit_offsets;
 
@@ -459,13 +673,11 @@ private:
     uint32_t _imageinfo_address, _imageinfo_replacement;
 
     FILE* _f;
-    const mach_header* _header;
     std::vector<FileoffFixup> _fixups;
-    const ProgramContext* _context;
-    std::vector<const segment_command*> _segments;
     std::vector<segment_command> _new_segments;
     ExtraStringRepository _extra_text, _extra_data;
-    std::vector<uint32_t> _entsize12_patches;
+    std::vector<uint32_t> _entsize12_patches, _nullify_patches;
+    ExtraBindRepository _extra_bind;
 
 private:
     void open_file(const boost::filesystem::path& filename) {
@@ -482,17 +694,6 @@ private:
     }
 
     void write_segment_content(const segment_command* cmd);
-
-    void foreach_command(void(DecachingFile::*action)(const load_command* cmd)) {
-        const unsigned char* cur_cmd = reinterpret_cast<const unsigned char*>(_header + 1);
-
-        for (uint32_t i = 0; i < _header->ncmds; ++ i) {
-            const load_command* cmd = reinterpret_cast<const load_command*>(cur_cmd);
-            cur_cmd += cmd->cmdsize;
-
-            (this->*action)(cmd);
-        }
-    }
 
     ExtraStringRepository* repo_for_segname(const char* segname) {
         if (!strcmp(segname, "__DATA"))
@@ -625,54 +826,54 @@ private:
                 dicmd.weak_bind_off = _new_linkedit_offsets.weak_bind_off;
                 dicmd.lazy_bind_off = _new_linkedit_offsets.lazy_bind_off;
                 dicmd.export_off = _new_linkedit_offsets.export_off;
+                dicmd.bind_size = _new_linkedit_offsets.bind_size;
                 fwrite(&dicmd, sizeof(dicmd), 1, _f);
                 break;
             }
         }
     }
 
-    void retrieve_segments(const load_command* cmd) {
-        if (cmd->cmd == LC_SEGMENT) {
-            const segment_command* segcmd = static_cast<const segment_command*>(cmd);
-            _segments.push_back(segcmd);
-            ExtraStringRepository* repo = this->repo_for_segname(segcmd->segname);
-            if (repo)
-                repo->set_section_vmaddr(segcmd->vmaddr + segcmd->vmsize);
-        }
-    }
-
-    // Convert VM address to file offset of the decached file _before_ inserting
-    //  the extra sections.
-    long from_vmaddr(uint32_t vmaddr) const {
-        BOOST_FOREACH(const segment_command* segcmd, _segments) {
-            if (segcmd->vmaddr <= vmaddr && vmaddr < segcmd->vmaddr + segcmd->vmsize)
-                return vmaddr - segcmd->vmaddr + segcmd->fileoff;
-        }
-        return -1;
-    }
-
     // Convert VM address to file offset of the decached file _after_ inserting
     //  the extra sections.
     long from_new_vmaddr(uint32_t vmaddr) const {
-        BOOST_FOREACH(const segment_command& segcmd, _new_segments) {
-            if (segcmd.vmaddr <= vmaddr && vmaddr < segcmd.vmaddr + segcmd.vmsize)
-                return vmaddr - segcmd.vmaddr + segcmd.fileoff;
+        std::vector<segment_command>::const_iterator nit;
+        std::vector<const segment_command*>::const_iterator oit;
+        
+        std::vector<segment_command>::const_iterator end = _new_segments.end(); 
+        for (nit = _new_segments.begin(), oit = _segments.begin(); nit != end; ++ nit, ++ oit) {
+            if (nit->vmaddr <= vmaddr && vmaddr < nit->vmaddr + nit->vmsize) {
+                uint32_t retval = vmaddr - nit->vmaddr + nit->fileoff;
+                // This mess is added to solve the __DATA,__bss section issue.
+                // This section is zero-filled, causing the segment's vmsize
+                //  larger than the filesize. Since the __extradat section is
+                //  placed after the __bss section, using just the formula above
+                //  will cause the imaginary size comes from that section to be
+                //  included as well. The "-=" below attempts to fix it.
+                if (vmaddr >= (*oit)->vmaddr + (*oit)->vmsize)
+                    retval -= (*oit)->vmsize - (*oit)->filesize;
+                return retval;
+            }
         }
+        
         return -1;
     }
-
-    // Checks if the VM address is included in the decached file _before_
-    //  inserting the extra sections.
-    bool contains_address(uint32_t vmaddr) const {
+    
+    // Get the segment number and offset from that segment given a VM address.
+    std::pair<int, uint32_t> segnum_and_offset(uint32_t vmaddr) const {
+        int i = 0;
         BOOST_FOREACH(const segment_command* segcmd, _segments) {
             if (segcmd->vmaddr <= vmaddr && vmaddr < segcmd->vmaddr + segcmd->vmsize)
-                return true;
+                return std::make_pair(i, vmaddr - segcmd->vmaddr);
+            ++ i;
         }
-        return false;
+        return std::make_pair(-1, ~0u);
     }
 
     void prepare_patch_objc_methods(uint32_t method_vmaddr, uint32_t override_vmaddr);
     void prepare_objc_extrastr(const segment_command* segcmd);
+
+    void get_address_info(uint32_t vmaddr, std::string* p_name, int* p_libord) const;
+    void add_extlink_to(uint32_t vmaddr, uint32_t override_vmaddr);
 
     void patch_objc_sects_callback(const char*, size_t, uint32_t new_address, const std::vector<uint32_t>& override_addresses) const {
         BOOST_FOREACH(uint32_t vmaddr, override_addresses) {
@@ -687,6 +888,7 @@ private:
         _extra_data.foreach_entry(this, &DecachingFile::patch_objc_sects_callback);
 
         this->patch_objc_sects_callback(NULL, 0, sizeof(method_t), _entsize12_patches);
+        this->patch_objc_sects_callback(NULL, 0, 0, _nullify_patches);
 
         if (_imageinfo_address) {
             long actual_offset = this->from_new_vmaddr(_imageinfo_address);
@@ -697,7 +899,7 @@ private:
 
 public:
     DecachingFile(const boost::filesystem::path& filename, const mach_header* header, const ProgramContext* context) :
-        _imageinfo_address(0), _header(header), _context(context),
+        MachOFile(header, context), _imageinfo_address(0),
         _extra_text("__TEXT", "__objc_extratxt", 2, 0),
         _extra_data("__DATA", "__objc_extradat", 0, 2)
     {
@@ -714,7 +916,11 @@ public:
             return;
 
         // phase 1
-        this->foreach_command(&DecachingFile::retrieve_segments);
+        BOOST_FOREACH(const segment_command* segcmd, _segments) {
+            ExtraStringRepository* repo = this->repo_for_segname(segcmd->segname);
+            if (repo)
+                repo->set_section_vmaddr(segcmd->vmaddr + segcmd->vmsize);
+        }
         BOOST_FOREACH(const segment_command* segcmd, _segments)
             this->prepare_objc_extrastr(segcmd);
 
@@ -758,6 +964,7 @@ class ProgramContext {
     const dyld_cache_header* _header;
     const shared_file_mapping_np* _mapping;
     const dyld_cache_image_info* _images;
+    std::vector<MachOFile> _macho_files;
 
 public:
     ProgramContext() :
@@ -816,7 +1023,7 @@ private:
     }
 
     const mach_header* mach_header_of_image(int i) const {
-        return _f->peek_data_at<mach_header>(this->from_vmaddr(_images[i].address));
+        return _macho_files[i].header();
     }
 
     off_t from_vmaddr(uint64_t vmaddr) const {
@@ -835,8 +1042,33 @@ private:
             return NULL;
         }
     }
-
+    
+    void process_export_trie_node(off_t start, off_t cur, off_t end, const std::string& prefix, uint32_t bias, boost::unordered_map<uint32_t, std::string>& exports) const {
+    	if (cur < end) {
+    		_f->seek(cur);
+    		unsigned char term_size = static_cast<unsigned char>(_f->read_char());
+    		if (term_size != 0) {
+    			/*unsigned flags =*/ _f->read_uleb128<unsigned>();
+    			unsigned addr = _f->read_uleb128<unsigned>() + bias;
+    			exports.insert(std::make_pair(addr, prefix));
+    		}
+    		unsigned char child_count = static_cast<unsigned char>(_f->read_char());
+    		off_t last_pos;
+    		for (unsigned char i = 0; i < child_count; ++ i) {
+    			const char* suffix = _f->read_string();
+    			unsigned offset = _f->read_uleb128<unsigned>();
+    			last_pos = _f->tell();
+    			this->process_export_trie_node(start, start + offset, end, prefix + suffix, bias, exports);
+    			_f->seek(last_pos);
+    		}
+    	}
+    }
+    
 public:
+    void fill_export(off_t start, off_t end, uint32_t bias, boost::unordered_map<uint32_t, std::string>& exports) const {
+        process_export_trie_node(start, start, end, "", bias, exports);
+    }
+
     bool initialize(int argc, char* argv[]) {
         this->parse_options(argc, argv);
         if (_filename == NULL) {
@@ -866,7 +1098,20 @@ public:
         _images = _f->peek_data_at<dyld_cache_image_info>(_header->imagesOffset);
         return true;
     }
-
+    
+    uint32_t image_containing_address(uint32_t vmaddr, std::string* symname = NULL) const {
+        uint32_t i = 0;
+        BOOST_FOREACH(const MachOFile& mo, _macho_files) {
+            if (mo.contains_address(vmaddr)) {
+                if (symname)
+                    *symname = mo.exported_symbol(vmaddr);
+                return i;
+            }
+            ++ i;
+        }
+        return ~0u;
+    }
+    
     bool is_print_mode() const { return _printmode; }
 
     const char* path_of_image(uint32_t i) const {
@@ -927,13 +1172,19 @@ public:
     }
 
     void save_all_images() {
+        _macho_files.clear();
+        for (uint32_t i = 0; i < _header->imagesCount; ++ i) {
+            const mach_header* mh = _f->peek_data_at<mach_header>(this->from_vmaddr(_images[i].address));
+            _macho_files.push_back(MachOFile(mh, this, _images[i].address));
+        }
+        
         for (uint32_t i = 0; i < _header->imagesCount; ++ i) {
             if (!this->should_skip_image(i)) {
                 this->save_complete_image(i);
             }
         }
     }
-
+    
     void print_info() const {
         printf(
             "magic = \"%-.16s\", dyldBaseAddress = 0x%llx\n"
@@ -966,17 +1217,51 @@ public:
 };
 
 
-void DecachingFile::write_segment_content(const segment_command* segcmd) {
-    ExtraStringRepository* repo = this->repo_for_segname(segcmd->segname);
+void MachOFile::retrieve_segments_and_libords(const load_command* cmd) {
+    switch (cmd->cmd) {
+        default:
+            break;
+        case LC_SEGMENT: {
+            const segment_command* segcmd = static_cast<const segment_command*>(cmd);
+            _segments.push_back(segcmd);
+            break;
+        }
+        case LC_LOAD_DYLIB:
+        case LC_ID_DYLIB:
+        case LC_LOAD_WEAK_DYLIB:
+        case LC_REEXPORT_DYLIB:
+        case LC_LAZY_LOAD_DYLIB:
+        case LC_LOAD_UPWARD_DYLIB: {
+            const dylib_command* dlcmd = static_cast<const dylib_command*>(cmd);
+            std::string dlname (dlcmd->dylib.name + reinterpret_cast<const char*>(dlcmd));
+            _libords.insert(std::make_pair(dlname, _cur_libord));
+            ++ _cur_libord;
+            break;
+        }
+        
+        case LC_DYLD_INFO:
+        case LC_DYLD_INFO_ONLY: {
+            if (_image_vmaddr) {
+                const dyld_info_command* dicmd = static_cast<const dyld_info_command*>(cmd);
+                if (dicmd->export_off)
+                    _context->fill_export(dicmd->export_off, dicmd->export_off + dicmd->export_size, _image_vmaddr, _exports);
+            }
+            break;
+        }
+    }
+}
 
-    if (repo) {
+void DecachingFile::write_segment_content(const segment_command* segcmd) {
+    if (!streq(segcmd->segname, "__LINKEDIT")) {
+        ExtraStringRepository* repo = this->repo_for_segname(segcmd->segname);
+
         const char* data_ptr = _context->peek_char_at_vmaddr(segcmd->vmaddr);
         long new_fileoff = ftell(_f);
 
         fwrite(data_ptr, 1, segcmd->filesize, _f);
         uint32_t filesize = segcmd->filesize;
 
-        if (repo->has_content()) {
+        if (repo && repo->has_content()) {
             repo->foreach_entry(this, &DecachingFile::write_extrastr);
 
             // make sure the section is aligned on 8-byte boundary...
@@ -1021,7 +1306,11 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
         case LC_DYLD_INFO_ONLY: {
             const dyld_info_command* cmdvar = static_cast<const dyld_info_command*>(cmd);
             TRY_WRITE(rebase_off, rebase_size, 1);
+            long curloc = ftell(_f);
+            long extra_size = _extra_bind.optimize_and_write(_f);
             TRY_WRITE(bind_off, bind_size, 1);
+            _new_linkedit_offsets.bind_off = curloc;
+            _new_linkedit_offsets.bind_size += extra_size;
             TRY_WRITE(weak_bind_off, weak_bind_size, 1);
             TRY_WRITE(lazy_bind_off, lazy_bind_size, 1);
             TRY_WRITE(export_off, export_size, 1);
@@ -1081,6 +1370,23 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
     #undef TRY_WRITE
 }
 
+void DecachingFile::get_address_info(uint32_t vmaddr, std::string* p_name, int* p_libord) const {
+    uint32_t which_image = _context->image_containing_address(vmaddr, p_name);
+    const char* image_name = _context->path_of_image(which_image);
+    *p_libord = this->libord_with_name(image_name);
+}
+
+void DecachingFile::add_extlink_to(uint32_t vmaddr, uint32_t override_vmaddr) {
+    if (!vmaddr)
+        return;
+    if (this->contains_address(vmaddr))
+        return;
+    _extra_bind.insert(vmaddr, this->segnum_and_offset(override_vmaddr), this, &DecachingFile::get_address_info);
+    // get class-dump-z to search for symbols instead of using this invalid
+    //  address directly.
+    _nullify_patches.push_back(override_vmaddr);
+}
+
 void DecachingFile::prepare_patch_objc_methods(uint32_t method_vmaddr, uint32_t override_vmaddr) {
     if (!method_vmaddr)
         return;
@@ -1128,9 +1434,12 @@ void DecachingFile::prepare_objc_extrastr(const segment_command* segcmd) {
                 for (uint32_t j = 0; j < sect.size/4; ++ j) {
                     uint32_t class_vmaddr = classes[j];
                     const class_t* class_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_vmaddr));
+                    this->add_extlink_to(class_obj->superclass, class_vmaddr + offsetof(class_t, superclass));
                     const class_ro_t* class_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(class_obj->data));
                     this->prepare_patch_objc_methods(class_data->baseMethods, class_obj->data + offsetof(class_ro_t, baseMethods));
+                    
                     const class_t* metaclass_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_obj->isa));
+                    this->add_extlink_to(metaclass_obj->superclass, class_obj->isa + offsetof(class_t, superclass));
                     const class_ro_t* metaclass_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(metaclass_obj->data));
                     this->prepare_patch_objc_methods(metaclass_data->baseMethods, metaclass_obj->data + offsetof(class_ro_t, baseMethods));
                 }

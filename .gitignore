@@ -1,3 +1,7 @@
 *.o
 *.out
+*.ii
+*.s
+dyld_decache
+libraries
 .DS_Store
