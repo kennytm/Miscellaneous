@@ -381,7 +381,13 @@ static long write_uleb128(FILE* f, unsigned u) {
     return byte_count;
 }
 
-
+static boost::filesystem::path remove_all_extensions(const char* the_path) {
+    boost::filesystem::path retval (the_path);
+    do {
+        retval = retval.stem();
+    } while (!retval.extension().empty());
+    return retval;
+}
 
 
 
@@ -980,7 +986,7 @@ private:
     void print_usage(char* path) const {
         const char* progname = path ? strrchr(path, '/')+1 : "dyld_decache";
         printf(
-            "dyld_decache v0.1\n"
+            "dyld_decache v0.1a\n"
             "Usage:\n"
             "  %s [-p] [-o folder] [-f name [-f name] ...] path/to/dyld_shared_cache_armvX\n"
             "\n"
@@ -1006,7 +1012,7 @@ private:
                     _printmode = true;
                     break;
                 case 'f':
-                    _namefilters.push_back(boost::filesystem::path(optarg).stem());
+                    _namefilters.push_back(remove_all_extensions(optarg));
                     break;
                 case '?':
                 case -1:
@@ -1126,7 +1132,7 @@ public:
         if (_namefilters.empty())
             return false;
             
-        boost::filesystem::path stem = boost::filesystem::path(path).stem();
+        boost::filesystem::path stem = remove_all_extensions(path);
         BOOST_FOREACH(const boost::filesystem::path& filt, _namefilters) {
             if (stem == filt)
                 return false;
