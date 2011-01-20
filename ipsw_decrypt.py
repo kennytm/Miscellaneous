@@ -27,6 +27,8 @@ import os.path
 from plistlib import readPlist
 import lxml.html
 import re
+from struct import Struct
+import subprocess
 
 
 class TemporaryDirectory(object):
@@ -55,7 +57,6 @@ class TemporaryDirectory(object):
 def parse_options():
     parser = OptionParser(usage='usage: %prog [options] path/to/ipsw', version='%prog 0.0')
     parser.add_option('-u', '--url', help='the URL to download the decryption keys.')
-    parser.add_option('-x', '--xpwn', help='location where the "xpwn" binary is installed.')
     parser.add_option('-d', '--vfdecrypt', help='location where "vfdecrypt" binary is installed.')
     parser.add_option('-o', '--output', help='the directory where the extracted files are placed to.')
     (options, args) = parser.parse_args()
@@ -84,7 +85,7 @@ _products = {
 _parenthesis_sub = re.compile('\s|\([^)]+\)|\..+$').sub
 _key_matcher = re.compile('\s*([\w ]+):\s*([a-fA-F\d]+)').search
 
-def extract_zipfile(ipsw_path):
+def extract_zipfile(ipsw_path, output_dir):
     with TemporaryDirectory() as td:
         print("<Info> Extracting content from {0}, it may take a minute...".format(ipsw_path))
         with closing(ZipFile(ipsw_path)) as zipfile:
@@ -102,6 +103,8 @@ def extract_zipfile(ipsw_path):
         
         td.move(output_dir)
         print("<Info> Extracted firmware to '{0}'. You may use the '-o \"{0}\"' switch in the future to skip this step.".format(output_dir))
+    
+    return output_dir
 
 
 _header_replacement_get = {
@@ -154,12 +157,65 @@ def get_decryption_info(plist_obj, output_dir, url=None):
     return key_map
 
 
+tag_unpack = Struct('<4s2I').unpack
+kbag_unpack = Struct('<2I16s').unpack
+
+
+
+def decrypt_img3(filename, outputfn, keystring, ivstring, openssl='openssl'):
+    basename = os.path.split(filename)[1]
+
+    with open(filename, 'rb') as f:
+        magic = f.read(4)
+        if magic != b'3gmI':
+            print("<Warning> '{0}' is not a valid IMG3 file. Skipping.".format(basename))
+            return
+        f.seek(16, os.SEEK_CUR)
+        
+        while True:
+            tag = f.read(12)
+            if not tag:
+                break
+            (tag_type, total_len, data_len) = tag_unpack(tag)
+            data_len &= ~15
+            
+            if tag_type == b'ATAD':
+                print("<Info> Decrypting '{0}'... ".format(basename), end='')
+                aes_len = str(len(keystring)*4)
+                # OUCH!
+                # Perhaps we an OpenSSL wrapper for Python 3.1
+                # (although it is actually quite fast now)
+                p = subprocess.Popen([openssl, 'aes-'+aes_len+'-cbc', '-d', '-nopad', '-K', keystring, '-iv', ivstring, '-out', outputfn], stdin=subprocess.PIPE)
+                bufsize = 16384
+                buf = bytearray(bufsize)
+                while data_len:
+                    bytes_to_read = min(data_len, bufsize)
+                    data_len -= bytes_to_read
+                    if bytes_to_read < bufsize:
+                        del buf[bytes_to_read:]
+                    f.readinto(buf)
+                    p.stdin.write(buf)
+                p.stdin.close()
+                if p.wait() == 0 and os.path.exists(outputfn):
+                    print("OK")
+                else:
+                    print("Failed")
+                return
+                
+            else:
+                f.seek(total_len - 12, os.SEEK_CUR)
+                
+        print("<Warning> Nothing was decrypted from '{0}'".format(basename))
+
+
+
 def decrypted_filename(path):
     (root, ext) = os.path.splitext(path)
     return root + '.decrypted' + ext
 
 
-def build_file_decryption_map(plist_obj, key_map):
+def build_file_decryption_map(plist_obj, key_map, output_dir):
+    file_key_map = {}
     for identity in plist_obj['BuildIdentities']:
         behavior = identity['Info']['RestoreBehavior']
         for key, content in identity['Manifest'].items():
@@ -175,17 +231,16 @@ def build_file_decryption_map(plist_obj, key_map):
 
             skip_reason = None
             level = 'Notice'
-            if key_lower not in key_map:
+            if os.path.exists(dec_path):
+                skip_reason = 'Already decrypted'
+                level = 'Info'
+            elif key_lower not in key_map:
                 skip_reason = 'No decryption key'
             elif not os.path.exists(path):
-                if os.path.exists(dec_path):
-                    skip_reason = 'Already decrypted'
-                    level = 'Info'
-                else:
-                    skip_reason = 'File does not exist'
+                skip_reason = 'File does not exist'
                     
             if skip_reason:
-                print("<{3}> Skipping {0} at '{1}': {2}".format(key, content['Info']['Path'], skip_reason, level))
+                print("<{3}> Skipping {0} ({1}): {2}".format(key, os.path.split(content['Info']['Path'])[1], skip_reason, level))
             else:
                 file_key_map[path] = {'dec_path': dec_path, 'keys': key_map[key_lower]}
 
@@ -199,7 +254,7 @@ def main():
     output_dir = options.output
     should_extract = True
     
-    if os.path.isdir(output_dir):
+    if output_dir and os.path.isdir(output_dir):
         build_manifest_file = os.path.join(output_dir, 'BuildManifest.plist')
         if os.path.exists(build_manifest_file):
             print("<Notice> Output directory '{0}' already exists. Assuming the IPSW has been extracted to this directory.".format(output_dir))
@@ -212,15 +267,18 @@ def main():
         if not args:
             print("<Error> Please supply the path to the IPSW file.")
             return
-        extract_zipfile(args[0])
+        output_dir = extract_zipfile(args[0], output_dir)
 
     build_manifest_file = os.path.join(output_dir, 'BuildManifest.plist')
     plist_obj = readPlist(build_manifest_file)
 
     key_map = get_decryption_info(plist_obj, output_dir, options.url)
-    file_key_map = build_file_decryption_map(plist_obj, key_map)
+    file_key_map = build_file_decryption_map(plist_obj, key_map, output_dir)
     
-    
+    for filename, info in file_key_map.items():
+        keys = info['keys']
+        if 'Key' in keys and 'IV' in keys:
+            decrypt_img3(filename, info['dec_path'], keys['Key'], keys['IV'])
     
     
     
