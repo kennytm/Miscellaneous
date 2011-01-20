@@ -25,6 +25,8 @@ import shutil
 import os
 import os.path
 from plistlib import readPlist
+import lxml.html
+import re
 
 
 class TemporaryDirectory(object):
@@ -58,9 +60,8 @@ def parse_options():
     parser.add_option('-o', '--output', help='the directory where the extracted files are placed to.')
     (options, args) = parser.parse_args()
     
-    if not args:
-        parser.error('Please supply the path to the IPSW file.')
-        options = None
+    if not args and not os.path.isdir(options.output):
+        parser.error('Please supply the path to the IPSW file or an existing output directory that contains the extracted firmware.')
     
     parser.destroy()
     
@@ -80,12 +81,121 @@ _products = {
     'iPod4,1': 'iPod touch 4G',
 }
 
+_parenthesis_sub = re.compile('\s|\([^)]+\)|\..+$').sub
+_key_matcher = re.compile('\s*([\w ]+):\s*([a-fA-F\d]+)').search
+
+def extract_zipfile(ipsw_path):
+    with TemporaryDirectory() as td:
+        print("<Info> Extracting content from {0}, it may take a minute...".format(ipsw_path))
+        with closing(ZipFile(ipsw_path)) as zipfile:
+            zipfile.extractall(td.directory)
+
+        if output_dir is None:
+            build_manifest_file = os.path.join(td.directory, 'BuildManifest.plist')
+            plist_obj = readPlist(build_manifest_file)
+            product_type = plist_obj['SupportedProductTypes'][0]
+            product_name = _products.get(product_type, product_type)
+            version = plist_obj['ProductVersion']
+            build = plist_obj['ProductBuildVersion']
+            
+            output_dir = '{0}, {1} ({2})'.format(product_name, version, build)
+        
+        td.move(output_dir)
+        print("<Info> Extracted firmware to '{0}'. You may use the '-o \"{0}\"' switch in the future to skip this step.".format(output_dir))
+
+
+_header_replacement_get = {
+    'mainfilesystem': 'os',
+    'rootfilesystem': 'os',
+    'glyphcharging': 'batterycharging',
+    'glyphplugin': 'batteryplugin',
+}.get
+
+
+def get_decryption_info(plist_obj, output_dir, url=None):
+    product_type = plist_obj['SupportedProductTypes'][0]
+    product_name = _products.get(product_type, product_type)
+    version = plist_obj['ProductVersion']
+    
+    build_info = plist_obj['BuildIdentities'][0]['Info']
+    build_train = build_info['BuildTrain']
+    build_number = build_info['BuildNumber']
+    device_class = build_info['DeviceClass']
+    
+    print("<Info> {0} ({1}), class {2}".format(product_name, product_type, device_class))
+    print("<Info> iOS version {0}, build {1} {2}".format(version, build_train, build_number))
+
+    if url is None:
+        url = 'http://theiphonewiki.com/wiki/index.php?title={0}_{1}_({2})'.format(build_train, build_number, product_name.translate({0x20:'_'}))
+
+    print("<Info> Downloading decryption keys from '{0}'...".format(url))
+
+    try:
+        htmldoc = lxml.html.parse(url)
+    except IOError as e:
+        print("<Error> {1}".format(url, e))
+        return None
+        
+    headers = htmldoc.iterfind('//h3/span[@class="mw-headline"]')
+    key_map = {}
+    for tag in headers:
+        header_name = _parenthesis_sub('', tag.text_content()).strip().lower()
+        header_name = _header_replacement_get(header_name, header_name)
+        ul = tag.getparent().getnext()
+        keys = {}
+        for li in ul.iterchildren('li'):
+            m = _key_matcher(li.text_content())
+            if m:
+                (key_type, key_value) = m.groups()
+                keys[key_type] = key_value
+        key_map[header_name] = keys
+    
+    print("<Info> Retrieved {0} keys.".format(len(key_map)))
+    return key_map
+
+
+def decrypted_filename(path):
+    (root, ext) = os.path.splitext(path)
+    return root + '.decrypted' + ext
+
+
+def build_file_decryption_map(plist_obj, key_map):
+    for identity in plist_obj['BuildIdentities']:
+        behavior = identity['Info']['RestoreBehavior']
+        for key, content in identity['Manifest'].items():
+            key_lower = key.lower()
+            if key_lower.startswith('restore'):
+                if key_lower == 'restoreramdisk' and behavior == 'Update':
+                    key_lower = 'updateramdisk'
+                else:
+                    continue
+                
+            path = os.path.join(output_dir, content['Info']['Path'])
+            dec_path = decrypted_filename(path)
+
+            skip_reason = None
+            level = 'Notice'
+            if key_lower not in key_map:
+                skip_reason = 'No decryption key'
+            elif not os.path.exists(path):
+                if os.path.exists(dec_path):
+                    skip_reason = 'Already decrypted'
+                    level = 'Info'
+                else:
+                    skip_reason = 'File does not exist'
+                    
+            if skip_reason:
+                print("<{3}> Skipping {0} at '{1}': {2}".format(key, content['Info']['Path'], skip_reason, level))
+            else:
+                file_key_map[path] = {'dec_path': dec_path, 'keys': key_map[key_lower]}
+
+    return file_key_map
+
+
 
 def main():
     (options, args) = parse_options()
-    
-    ipsw_path = args[0]
-    
+        
     output_dir = options.output
     should_extract = True
     
@@ -99,41 +209,21 @@ def main():
         
         
     if should_extract:
-        with TemporaryDirectory() as td:
-            print("<Info> Extracting content from {0}, it may take a minute...".format(ipsw_path))
-            with closing(ZipFile(ipsw_path)) as zipfile:
-                zipfile.extractall(td.directory)
-    
-            if output_dir is None:
-                build_manifest_file = os.path.join(td.directory, 'BuildManifest.plist')
-                plist_obj = readPlist(build_manifest_file)
-                product_type = plist_obj['SupportedProductTypes'][0]
-                product_name = _products.get(product_type, product_type)
-                version = plist_obj['ProductVersion']
-                build = plist_obj['ProductBuildVersion']
-                
-                output_dir = '{0}, {1} ({2})'.format(product_name, version, build)
-            
-            td.move(output_dir)
-            
+        if not args:
+            print("<Error> Please supply the path to the IPSW file.")
+            return
+        extract_zipfile(args[0])
+
     build_manifest_file = os.path.join(output_dir, 'BuildManifest.plist')
     plist_obj = readPlist(build_manifest_file)
-    
-    product_type = plist_obj['SupportedProductTypes'][0]
-    product_name = _products.get(product_type, product_type)
-    version = plist_obj['ProductVersion']
-    
-    build_identity = plist_obj['BuildIdentities'][0]
-    build_info = build_identity['Info']
-    build_train = build_info['BuildTrain']
-    build_number = build_info['BuildNumber']
-    device_class = build_info['DeviceClass']
-    
-    print("<Info> {0} ({1}), class {2}".format(product_name, product_type, device_class))
-    print("<Info> iOS version {0}, build {1} {2}".format(version, build_train, build_number))
-    
-    
 
+    key_map = get_decryption_info(plist_obj, output_dir, options.url)
+    file_key_map = build_file_decryption_map(plist_obj, key_map)
+    
+    
+    
+    
+    
     
 if __name__ == '__main__':
     main()
