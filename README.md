@@ -58,3 +58,12 @@ the options are:
                   extract more than one file. If not specified, all files will be
                   extracted.
 
+machoizer.py
+------------
+
+This is a small Python script that adds the necessary headers to turn a raw
+binary file (e.g. the decrypted iBoot) into a Mach-O file. This is useful for
+tools that cannot work with raw binary files, like `otool -tv` or the IDA Pro
+demo.
+
+
