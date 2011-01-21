@@ -67,3 +67,16 @@ tools that cannot work with raw binary files, like `otool -tv` or the IDA Pro
 demo.
 
 
+dump_caatom.py
+--------------
+
+[CAAtom](http://iphonedevwiki.net/index.php?title=CAAtom) is an internal data
+type in Core Animation which creates a mapping between strings and an integer
+index. This optimizes string comparison operation over known strings since they
+are already perfectly hashed. However, this poses a difficulty in
+reverse-engineering because the relevant strings are all replaced with some
+unrelated numbers. 
+
+This script is built to read the table that defines the mappings of the internal
+atoms. 
+
