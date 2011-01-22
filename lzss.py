@@ -98,7 +98,7 @@ class RingBuffer(object):
                     yield _lift_limited(0, size)
 
 
-def decompress_lzss(fin, fout):
+def decompress_lzss(fin, fout, report_progress=False):
     N = 4096
     F = 18
     THRESHOLD = 2
@@ -109,6 +109,9 @@ def decompress_lzss(fin, fout):
     flags = 0
     
     write_res = bytearray()
+    fw = write_res.append
+    fw2 = write_res.extend
+    
     read_res = fin.read()
     length = len(read_res)
     
@@ -121,7 +124,7 @@ def decompress_lzss(fin, fout):
     
     try:
         while True:
-            if idx >= target:
+            if report_progress and idx >= target:
                 print ("<Info> Decompressing LZSS... ({0}%)".format(percentage), end="\r")
                 percentage += 1
                 target = (percentage * length) // 100
@@ -155,10 +158,21 @@ def decompress_lzss(fin, fout):
     except IndexError:
         pass
         
-    print("")    
+    if report_progress:
+        print("")
     fout.write(write_res)
 
+
+
+def decompress_iBootIm(fin, fout, report_progress=False):
+    if report_progress:
+        stru = Struct('<4s2H')
+        (pal, width, height) = stru.unpack(fin.read(stru.size))
+        print("<Notice> Image color format: {0}; size: {1}x{2}".format(pal[::-1].decode(), width, height))
     
+    fin.seek(0x40, os.SEEK_SET)
+    decompress_lzss(fin, fout, False)
+
 
 
 def decompressor(fin):
@@ -167,7 +181,12 @@ def decompressor(fin):
         fin.seek(0x180, os.SEEK_SET)
         return decompress_lzss
     elif magic == b'iBootIm\0':
-        return None # decompress_iBootIm
+        fin.seek(4, os.SEEK_CUR)
+        comptype = fin.read(4)[::-1]
+        if b'lzss' == comptype:
+            return decompress_iBootIm
+        else:
+            print("<Warning> Not decompressing iBootIm image compressed with {0}".format(comptype))
     else:
         return None
     

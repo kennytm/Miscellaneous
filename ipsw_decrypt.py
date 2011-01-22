@@ -304,7 +304,7 @@ def main():
                 decomp_func = decompressor(fin)
                 if decomp_func is not None:
                     with NamedTemporaryFile() as fout:
-                        decomp_func(fin, fout)
+                        decomp_func(fin, fout, report_progress=True)
                         fin.close()
                         fin = None
                         os.rename(fout.name, dec_path)
