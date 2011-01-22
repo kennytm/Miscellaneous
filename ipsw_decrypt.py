@@ -220,11 +220,13 @@ def build_file_decryption_map(plist_obj, key_map, output_dir):
         behavior = identity['Info']['RestoreBehavior']
         for key, content in identity['Manifest'].items():
             key_lower = key.lower()
-            if key_lower.startswith('restore'):
-                if key_lower == 'restoreramdisk' and behavior == 'Update':
+            if behavior == 'Update':
+                if key_lower == 'restoreramdisk':
                     key_lower = 'updateramdisk'
                 else:
                     continue
+            elif key_lower.startswith('restore') and key_lower != 'restoreramdisk':
+                continue
                 
             path = os.path.join(output_dir, content['Info']['Path'])
             dec_path = decrypted_filename(path)
