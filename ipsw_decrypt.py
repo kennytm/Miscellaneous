@@ -18,7 +18,7 @@
 #
 
 from optparse import OptionParser
-from tempfile import mkdtemp
+from tempfile import mkdtemp, NamedTemporaryFile
 from zipfile import ZipFile
 from contextlib import closing
 import shutil
@@ -29,6 +29,7 @@ import lxml.html
 import re
 from struct import Struct
 import subprocess
+from lzss import decompressor
 
 
 class TemporaryDirectory(object):
@@ -290,13 +291,29 @@ def main():
     
     for filename, info in file_key_map.items():
         keys = info['keys']
+        dec_path = info['dec_path']
+
         if 'Key' in keys and 'IV' in keys:
             decrypt_img3(filename, info['dec_path'], keys['Key'], keys['IV'])
         elif 'VFDecrypt Key' in keys:
             vfdecrypt(filename, info['dec_path'], keys['VFDecrypt Key'], options.vfdecrypt)
     
-    
-    
+        if os.path.exists(dec_path):
+            try:
+                fin = open(dec_path, 'rb')     
+                decomp_func = decompressor(fin)
+                if decomp_func is not None:
+                    with NamedTemporaryFile() as fout:
+                        decomp_func(fin, fout)
+                        fin.close()
+                        fin = None
+                        os.rename(fout.name, dec_path)
+                        with open(fout.name, 'wb'):
+                            pass
+            finally:
+                if fin:
+                    fin.close()
+
     
 if __name__ == '__main__':
     main()
