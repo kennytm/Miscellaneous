@@ -57,7 +57,7 @@ class TemporaryDirectory(object):
 def parse_options():
     parser = OptionParser(usage='usage: %prog [options] path/to/ipsw', version='%prog 0.0')
     parser.add_option('-u', '--url', help='the URL to download the decryption keys.')
-    parser.add_option('-d', '--vfdecrypt', help='location where "vfdecrypt" binary is installed.')
+    parser.add_option('-d', '--vfdecrypt', help='location where "vfdecrypt" binary is installed.', default='vfdecrypt')
     parser.add_option('-o', '--output', help='the directory where the extracted files are placed to.')
     (options, args) = parser.parse_args()
     
@@ -180,7 +180,7 @@ def decrypt_img3(filename, outputfn, keystring, ivstring, openssl='openssl'):
             data_len &= ~15
             
             if tag_type == b'ATAD':
-                print("<Info> Decrypting '{0}'... ".format(basename), end='')
+                print("<Info> Decrypting '{0}'... ".format(basename))
                 aes_len = str(len(keystring)*4)
                 # OUCH!
                 # Perhaps we an OpenSSL wrapper for Python 3.1
@@ -196,16 +196,27 @@ def decrypt_img3(filename, outputfn, keystring, ivstring, openssl='openssl'):
                     f.readinto(buf)
                     p.stdin.write(buf)
                 p.stdin.close()
-                if p.wait() == 0 and os.path.exists(outputfn):
-                    print("OK")
-                else:
-                    print("Failed")
+                if p.wait() != 0 or not os.path.exists(outputfn):
+                    print("<Error> Decryption failed!")
                 return
                 
             else:
                 f.seek(total_len - 12, os.SEEK_CUR)
                 
         print("<Warning> Nothing was decrypted from '{0}'".format(basename))
+
+
+
+def vfdecrypt(filename, outputfn, keystring, bin='vfdecrypt'):
+    basename = os.path.split(filename)[1]
+    print("<Info> Decrypting '{0}', it may take a minute...".format(basename))
+    try:
+        retcode = subprocess.call([bin, '-i', filename, '-k', keystring, '-o', outputfn])
+    except OSError as e:
+        print("<Error> Received exception '{0}' when trying to run '{1}'.".format(e, bin))
+    else:
+        if retcode:
+            print("<Error> VFDecrypt of '{1}' failed with error code {0}.".format(retcode, basename))
 
 
 
@@ -281,6 +292,8 @@ def main():
         keys = info['keys']
         if 'Key' in keys and 'IV' in keys:
             decrypt_img3(filename, info['dec_path'], keys['Key'], keys['IV'])
+        elif 'VFDecrypt Key' in keys:
+            vfdecrypt(filename, info['dec_path'], keys['VFDecrypt Key'], options.vfdecrypt)
     
     
     
