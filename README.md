@@ -95,3 +95,24 @@ identified any function that takes a C string function name as an input
 parameter (via register r0 to r3), you could start this script to locate all
 analyzed functions calling this. Then the script will coservatively try to
 rename the function based on the input.
+
+[ipsw_decrypt.py](https://github.com/kennytm/Miscellaneous/blob/master/ipsw_decrypt.py)
+-----------------
+
+This is a convenient script to extract, decrypt and decompress files in an IPSW
+file in one pass. This script is **only** intended for decoding those files for
+analysis, but not for building a jailbroken IPSW. The standard jailbreaking
+software like PwnageTool or XPwn should be used instead for the latter purpose.
+
+The script can perform the following:
+
+ * Extract the encrypted files from an IPSW
+ * Download decryption keys from <http://theiphonewiki.com/>
+ * Perform AES decryption / VFDecrypt using these keys
+ * Decompress the kernel into a Mach-O file, and iBootIm images into raw data.
+
+This script requires the executables `openssl` (for AES decryption) and
+[`vfdecrypt`](https://github.com/dra1nerdrake/VFDecrypt) (for decrypting the OS
+DMG) to run. It also requires the [`lxml`](http://codespeak.net/lxml/installation.html)
+module to be installed for HTML parsing.
+
