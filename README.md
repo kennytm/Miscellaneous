@@ -58,8 +58,8 @@ the options are:
                   extract more than one file. If not specified, all files will be
                   extracted.
 
-machoizer.py
-------------
+[machoizer.py](https://github.com/kennytm/Miscellaneous/blob/master/machoizer.py)
+--------------
 
 This is a small Python script that adds the necessary headers to turn a raw
 binary file (e.g. the decrypted iBoot) into a Mach-O file. This is useful for
@@ -67,8 +67,8 @@ tools that cannot work with raw binary files, like `otool -tv` or the IDA Pro
 demo.
 
 
-dump_caatom.py
---------------
+[dump_caatom.py](https://github.com/kennytm/Miscellaneous/blob/master/dump_caatom.py)
+----------------
 
 [CAAtom](http://iphonedevwiki.net/index.php?title=CAAtom) is an internal data
 type in Core Animation which creates a mapping between strings and an integer
@@ -80,3 +80,18 @@ unrelated numbers.
 This script is built to read the table that defines the mappings of the internal
 atoms. 
 
+
+[log_rename.idc](https://github.com/kennytm/Miscellaneous/blob/master/log_rename.idc)
+----------------
+
+Often executables or kernels are stripped, so guessing what a function does
+would require heavy analysis of its content. Nevertheless, developers usually 
+will leave a logging function which accepts `__FUNCTION__`, i.e. the function
+name, as an input parameter. If such a function is found, the function names can
+be assigned systematically.
+
+The `log_rename.idc` script is written to take advantage of this. Once you have
+identified any function that takes a C string function name as an input
+parameter (via register r0 to r3), you could start this script to locate all
+analyzed functions calling this. Then the script will coservatively try to
+rename the function based on the input.
