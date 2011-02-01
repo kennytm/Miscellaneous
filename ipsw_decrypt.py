@@ -77,6 +77,7 @@ _products = {
     'iPhone1,2': 'iPhone 3G',
     'iPhone2,1': 'iPhone 3GS',
     'iPhone3,1': 'iPhone 4',
+    'iPhone3,3': 'iPhone 4 CDMA',
     'iPod1,1': 'iPod touch 1G',
     'iPod2,1': 'iPod touch 2G',
     'iPod3,1': 'iPod touch 3G',
