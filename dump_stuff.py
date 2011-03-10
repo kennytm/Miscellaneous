@@ -29,20 +29,39 @@ from macho.utilities import peekStructs
 
 def parse_options():
     parser = ArgumentParser()
-    parser.add_argument('--version', action='version', version='%(prog)s 0.1')
+    parser.add_argument('--version', action='version', version='dump_stuff 0.1')
     parser.add_argument('-y', '--arch', help='the CPU architecture. Default to "armv7".', default="armv7")
-    parser.add_argument('-s', '--stringpool', help='the symbol that contains the string pool.', default='_stringpool_contents', metavar='SYM')
-    parser.add_argument('-w', '--wordlist', help='the symbol that contains the word list.', default='_wordlist', metavar='SYM')
-    parser.add_argument('-n', '--count', help='the number of words in the word list. By default, it will continue until hitting the _stringpool_contents symbol.')
-    parser.add_argument('-p', '--format', help='print format. Either "table" (default) or "enum".', default='table', choices=["table", "enum"])
-    parser.add_argument('filename', help='Path to QuartzCore')
-    args = parser.parse_args()
     
-    return (args, args.filename)
+    subparsers = parser.add_subparsers(help='commands')
+    ccatom_parser = subparsers.add_parser('caatom', help='Dump CAAtom symbols from QuartzCore')
+    ccatom_parser.add_argument('-s', '--stringpool', help='the symbol that contains the string pool.', default='_stringpool_contents', metavar='SYM')
+    ccatom_parser.add_argument('-w', '--wordlist', help='the symbol that contains the word list.', default='_wordlist', metavar='SYM')
+    ccatom_parser.add_argument('-n', '--count', help='the number of words in the word list. By default, it will continue until hitting the _stringpool_contents symbol.')
+    ccatom_parser.add_argument('-p', '--format', help='print format. Either "table" (default) or "enum".', default='table', choices=["table", "enum"])
+    ccatom_parser.set_defaults(func=caatom_main)
+
+    parser.add_argument('filename', help='Path to file to dump')
+    return parser.parse_args()
 
 
+#--------- CAAtom --------------------------------------------------------------
 
-def get_atoms(opts, inputfn):
+def caatom_main(opts):
+    atoms = sorted(get_atoms(opts))
+
+    if opts.format == 'enum':
+        print("enum CAInternalAtom {")
+        for atom, string in atoms:
+            print("\tkCAInternalAtom_{0} = {1},".format(string, atom))
+        print("\tkCAInternalAtomCount = {0}\n}};\n".format(max(a[0] for a in atoms)+1));
+    else:
+        print('--dec  --hex   string')
+        for atom, string in atoms:
+            print("{1:5}  {1:5x}   {0}".format(string, atom))
+
+
+def get_atoms(opts):
+    inputfn = opts.filename
     with MachO(inputfn, opts.arch) as mo:
         try:
             spc_sym = mo.symbols.any1('name', opts.stringpool)
@@ -64,21 +83,12 @@ def get_atoms(opts, inputfn):
                 yield (atom, mo.derefString(strindex + spc_sym.addr))
         
 
+#--------- etc -----------------------------------------------------------------
+
 def main():
-    (opts, inputfn) = parse_options()
-    atoms = sorted(get_atoms(opts, inputfn))
-    
-    if opts.format == 'enum':
-        print("enum CAInternalAtom {")    
-        for atom, string in atoms:
-            print("\tkCAInternalAtom_{0} = {1},".format(string, atom))
-        print("\tkCAInternalAtomCount = {0}\n}};\n".format(max(a[0] for a in atoms)+1));
-    else:
-        print('--dec  --hex   string')
-        for atom, string in atoms:
-            print("{1:5}  {1:5x}   {0}".format(string, atom))
-        
-    
+    opts = parse_options()
+    opts.func(opts)
+
 
 if __name__ == '__main__':
     main()
