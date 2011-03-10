@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.1
+#!/usr/bin/env python3.2
 #
 #    dump_caatom.py ... Print the list of predefined CAAtom from QuartzCore
 #    Copyright (C) 2011  KennyTM~ <kennytm@gmail.com>
@@ -22,26 +22,23 @@ sys.path.append('./EcaFretni/')
 import macho.features
 macho.features.enable('vmaddr', 'symbol')
 
-from optparse import OptionParser
+from argparse import ArgumentParser
 
 from macho.macho import MachO
 from macho.utilities import peekStructs
 
 def parse_options():
-    parser = OptionParser(usage='usage: %prog [options] path/to/QuartzCore', version='%prog 0.0')
-    parser.add_option('-y', '--arch', help='the CPU architecture. Default to "armv7".', default="armv7")
-    parser.add_option('-s', '--stringpool', help='the symbol that contains the string pool.', default='_stringpool_contents', metavar='SYM')
-    parser.add_option('-w', '--wordlist', help='the symbol that contains the word list.', default='_wordlist', metavar='SYM')
-    parser.add_option('-n', '--count', help='the number of words in the word list. By default, it will continue until hitting the _stringpool_contents symbol.')
-    parser.add_option('-p', '--format', help='print format. Either "table" (default) or "enum".', default='table', type='choice', choices=["table", "enum"])
-    (options, args) = parser.parse_args()
+    parser = ArgumentParser()
+    parser.add_argument('--version', action='version', version='%(prog)s 0.1')
+    parser.add_argument('-y', '--arch', help='the CPU architecture. Default to "armv7".', default="armv7")
+    parser.add_argument('-s', '--stringpool', help='the symbol that contains the string pool.', default='_stringpool_contents', metavar='SYM')
+    parser.add_argument('-w', '--wordlist', help='the symbol that contains the word list.', default='_wordlist', metavar='SYM')
+    parser.add_argument('-n', '--count', help='the number of words in the word list. By default, it will continue until hitting the _stringpool_contents symbol.')
+    parser.add_argument('-p', '--format', help='print format. Either "table" (default) or "enum".', default='table', choices=["table", "enum"])
+    parser.add_argument('filename', help='Path to QuartzCore')
+    args = parser.parse_args()
     
-    if not args:
-        parser.error('Please supply the path to QuartzCore.')
-    
-    parser.destroy()
-    
-    return (options, args[0])
+    return (args, args.filename)
 
 
 
