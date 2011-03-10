@@ -73,6 +73,9 @@ def parse_options():
 _products = {
     'AppleTV2,1': 'Apple TV 2G',
     'iPad1,1': 'iPad',
+    'iPad2,1': 'iPad 2 Wi-Fi',
+    'iPad2,2': 'iPad 2 GSM',
+    'iPad2,3': 'iPad 2 CDMA',
     'iPhone1,1': 'iPhone',
     'iPhone1,2': 'iPhone 3G',
     'iPhone2,1': 'iPhone 3GS',
