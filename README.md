@@ -67,18 +67,24 @@ tools that cannot work with raw binary files, like `otool -tv` or the IDA Pro
 demo.
 
 
-[dump_caatom.py](https://github.com/kennytm/Miscellaneous/blob/master/dump_caatom.py)
+[dump_stuff.py](https://github.com/kennytm/Miscellaneous/blob/master/dump_stuff.py)
 ----------------
+
+This script is a collection of utilities to dump information from different 
+libraries. Currently it supports dumping of CAAtom and UISound.
 
 [CAAtom](http://iphonedevwiki.net/index.php?title=CAAtom) is an internal data
 type in Core Animation which creates a mapping between strings and an integer
 index. This optimizes string comparison operation over known strings since they
 are already perfectly hashed. However, this poses a difficulty in
 reverse-engineering because the relevant strings are all replaced with some
-unrelated numbers. 
+unrelated numbers. This script supports reading the table that defines the
+mappings of the internal atoms.
 
-This script is built to read the table that defines the mappings of the internal
-atoms. 
+UISound is a directory in iOS containing .caf files for system alert sounds.
+These sounds are indiced by a constant number and can be used as the SoundID in
+[AudioServices](http://iphonedevwiki.net/index.php/AudioServices) to play them.
+This script supports interpreting the sound IDs and categories for these files.
 
 
 [log_rename.idc](https://github.com/kennytm/Miscellaneous/blob/master/log_rename.idc)
