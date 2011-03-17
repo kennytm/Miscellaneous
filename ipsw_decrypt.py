@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.1
+#!/usr/bin/env python3.2
 #    
 #    ipsw_decrypt.py ... Extract and decrypt all objects in an IPSW file.
 #    Copyright (C) 2011  KennyTM~ <kennytm@gmail.com>
@@ -17,7 +17,7 @@
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from optparse import OptionParser
+from argparse import ArgumentParser
 from tempfile import mkdtemp, NamedTemporaryFile
 from zipfile import ZipFile
 from contextlib import closing
@@ -56,18 +56,18 @@ class TemporaryDirectory(object):
 
 
 def parse_options():
-    parser = OptionParser(usage='usage: %prog [options] path/to/ipsw', version='%prog 0.0')
-    parser.add_option('-u', '--url', help='the URL to download the decryption keys.')
-    parser.add_option('-d', '--vfdecrypt', help='location where "vfdecrypt" binary is installed.', default='vfdecrypt')
-    parser.add_option('-o', '--output', help='the directory where the extracted files are placed to.')
-    (options, args) = parser.parse_args()
+    parser = ArgumentParser()
+    parser.add_argument('--version', action='version', version='ipsw_decrypt 0.0')
+    parser.add_argument('-u', '--url', help='the URL to download the decryption keys.')
+    parser.add_argument('-d', '--vfdecrypt', help='location where "vfdecrypt" binary is installed.', default='vfdecrypt')
+    parser.add_argument('-o', '--output', help='the directory where the extracted files are placed to.')
+    parser.add_argument('filename', help='path to the IPSW file', nargs='?')
+    options = parser.parse_args()
     
-    if not args and not os.path.isdir(options.output):
+    if not options.filename and not (options.output and os.path.isdir(options.output)):
         parser.error('Please supply the path to the IPSW file or an existing output directory that contains the extracted firmware.')
     
-    parser.destroy()
-    
-    return (options, args)
+    return options
 
 
 _products = {
@@ -150,15 +150,25 @@ def get_decryption_info(plist_obj, output_dir, url=None):
         header_name = _parenthesis_sub('', tag.text_content()).strip().lower()
         header_name = _header_replacement_get(header_name, header_name)
         ul = tag.getparent().getnext()
+        if ul.tag == 'ul':
+            key_children = ul.iterchildren('li')
+        elif ul.tag == 'p':
+            key_children = [ul]
+        else:
+            continue
         keys = {}
-        for li in ul.iterchildren('li'):
+        for li in key_children:
             m = _key_matcher(li.text_content())
             if m:
                 (key_type, key_value) = m.groups()
+                key_type = key_type.strip()
+                if key_type == 'VFDecrypt':
+                    key_type += ' Key'
                 keys[key_type] = key_value
         key_map[header_name] = keys
     
     print("<Info> Retrieved {0} keys.".format(len(key_map)))
+        
     return key_map
 
 
@@ -267,7 +277,8 @@ def build_file_decryption_map(plist_obj, key_map, output_dir):
 
 
 def main():
-    (options, args) = parse_options()
+    options = parse_options()
+    filename = options.filename
         
     output_dir = options.output
     should_extract = True
@@ -282,10 +293,10 @@ def main():
         
         
     if should_extract:
-        if not args:
+        if not filename:
             print("<Error> Please supply the path to the IPSW file.")
             return
-        output_dir = extract_zipfile(args[0], output_dir)
+        output_dir = extract_zipfile(filename, output_dir)
 
     build_manifest_file = os.path.join(output_dir, 'BuildManifest.plist')
     plist_obj = readPlist(build_manifest_file)
