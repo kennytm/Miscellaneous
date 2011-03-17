@@ -24,6 +24,7 @@ macho.features.enable('vmaddr', 'symbol', 'strings')
 
 from argparse import ArgumentParser
 from collections import defaultdict
+from struct import Struct
 
 from macho.loader import MachOLoader
 from macho.utilities import peekStructs
@@ -45,15 +46,18 @@ def parse_options():
     
     subparsers = parser.add_subparsers(help='commands')
     
-    ccatom_parser = subparsers.add_parser('caatom',
+    caatom_parser = subparsers.add_parser('caatom',
         help='Dump CAAtom symbols from QuartzCore')
-    ccatom_parser.add_argument('-p', '--format', default='table', choices=["table", "enum"],
+    caatom_parser.add_argument('-p', '--format', default='table', choices=["table", "enum"],
         help='print format. Either "table" (default) or "enum".')
-    ccatom_parser.add_argument('filename', nargs='?', default='QuartzCore',
+    caatom_parser.add_argument('-n', '--atoms', default=0, type=int,
+        help='number of atoms to dump.')
+    caatom_parser.add_argument('filename', nargs='?', default='QuartzCore',
         help='Path to QuartzCore file.')
-    ccatom_parser.set_defaults(func=caatom_main)
+    caatom_parser.set_defaults(func=caatom_main)
 
-    uisound_parser = subparsers.add_parser('uisound', help='Dump UISound filenames from AudioToolbox')
+    uisound_parser = subparsers.add_parser('uisound',
+        help='Dump UISound filenames from AudioToolbox')
     uisound_parser.add_argument('--testvalue', default=1000, metavar='ID', type=int,
         help='first value of Sound ID.')
     uisound_parser.add_argument('audioToolbox', nargs='?', default='AudioToolbox',
@@ -61,14 +65,47 @@ def parse_options():
     uisound_parser.add_argument('coreMedia', nargs='?', default='CoreMedia',
         help='Path to CoreMedia file.')
     uisound_parser.set_defaults(func=uisound_main)
+    
+    cafilter_parser = subparsers.add_parser('cafilter',
+        help='Dump all static CAFilter from QuartzCore')
+    cafilter_parser.add_argument('-n', '--atoms', default=0, type=int,
+        help='number of atoms it contains.')
+    cafilter_parser.add_argument('--count', default=100, type=int,
+        help='Maximum number of filters.')
+    cafilter_parser.add_argument('filename', nargs='?', default='QuartzCore',
+        help='Path to QuartzCore file.')
+    cafilter_parser.set_defaults(func=cafilter_main)
 
     return parser.parse_args()
 
 
+def get_atoms(opts, mo):
+    try:
+        spc_sym = mo.symbols.any1('name', '_stringpool_contents')
+        wl_sym = mo.symbols.any1('name', '_wordlist')
+    except KeyError as e:
+        print("Error: Symbol '{0}' not found.".format(e.args[0]))
+        return
+        
+    count = opts.atoms or (spc_sym.addr - wl_sym.addr) // 4
+    if count <= 0:
+        print("Error: Word list count '{0}' is invalid.".format(count))
+        return
+        
+    mo.seek(mo.fromVM(wl_sym.addr))
+    for strindex, atom in peekStructs(mo.file, mo.makeStruct('2H'), count):
+        if atom:
+            yield (atom, mo.derefString(strindex + spc_sym.addr))
+
 #--------- CAAtom --------------------------------------------------------------
 
 def caatom_main(opts):
-    atoms = sorted(get_atoms(opts))
+    inputfn = opts.filename
+    with MachOLoader(inputfn, arch=opts.arch, sdk=opts.sdk, cache=opts.cache) as (mo,):
+        if mo is None:
+            print("Error: {0} is not found.".format(inputfn))
+            return
+        atoms = sorted(get_atoms(opts, mo))
 
     if opts.format == 'enum':
         print("enum CAInternalAtom {")
@@ -80,30 +117,42 @@ def caatom_main(opts):
         for atom, string in atoms:
             print("{1:5}  {1:5x}   {0}".format(string, atom))
 
+#--------- CAFilter ------------------------------------------------------------
 
-def get_atoms(opts):
+def cafilter_main(opts):
     inputfn = opts.filename
     with MachOLoader(inputfn, arch=opts.arch, sdk=opts.sdk, cache=opts.cache) as (mo,):
         if mo is None:
             print("Error: {0} is not found.".format(inputfn))
             return
-    
+        
         try:
-            spc_sym = mo.symbols.any1('name', '_stringpool_contents')
-            wl_sym = mo.symbols.any1('name', '_wordlist')
+            filter_inputs_sym = mo.symbols.any('name', '__ZL13filter_inputs') or \
+                                mo.symbols.any1('name', '_filter_inputs')
+            addr = filter_inputs_sym.addr
         except KeyError as e:
             print("Error: Symbol '{0}' not found.".format(e.args[0]))
             return
-            
-        count = (spc_sym.addr - wl_sym.addr) // 4
-        if count <= 0:
-            print("Error: Word list count '{0}' is invalid.".format(count))
-            return
-            
-        mo.seek(mo.fromVM(wl_sym.addr))
-        for strindex, atom in peekStructs(mo.file, mo.makeStruct('2H'), count):
-            if atom:
-                yield (atom, mo.derefString(strindex + spc_sym.addr))
+
+        print("--------------filter  input")
+        sep = '\n' + ' ' * 22
+
+        atoms = dict(get_atoms(opts, mo))
+        ptr_stru = mo.makeStruct('^')
+        for _ in range(opts.count):
+            filter_name_atom = mo.deref(addr, ptr_stru)[0]
+            if filter_name_atom not in atoms:
+                break
+            addr += ptr_stru.size
+            input_count = mo.deref(addr, ptr_stru)[0]
+            addr += ptr_stru.size
+            input_names = []
+            for _ in range(input_count):
+                input_atom = mo.deref(addr, ptr_stru)[0]
+                addr += ptr_stru.size
+                input_names.append(atoms[input_atom])
+            print("{0:20}: {1}".format(atoms[filter_name_atom], sep.join(input_names)))
+        
 
 #--------- UISound -------------------------------------------------------------
 
@@ -164,12 +213,13 @@ class UISoundCoreMediaOnBranch(object):
             thread.forceReturn() 
 
 
-def uisound_get_name_for_input(mo, thread, startAddr, value, testValues):
+def uisound_get_name_for_input(mo, thread, startAddr, value, testValues, instrSet):
     mem = thread.memory
     
     retstr = mem.alloc("-")
     retbool = mem.alloc(0)
     
+    thread.instructionSet = instrSet
     thread.pc = startAddr
     thread.r[0] = Parameter("input", value)
     thread.r[1] = retstr
@@ -208,9 +258,9 @@ def uisound_get_filenames(mo, f_sym, iphone_sound_sym, testValue):
     startAddr = f_sym.addr
 
     thread = Thread(mo)
-    thread.instructionSet = f_sym.isThumb
     thread.onBranch = UISoundOnBranchHolder(mo)
     
+    instrSet = f_sym.isThumb
     fnmaps = {}
     
     while True:
@@ -221,11 +271,11 @@ def uisound_get_filenames(mo, f_sym, iphone_sound_sym, testValue):
         exhaustedValues.add(anyValue)
 
         thread.memory.set(iphone_sound_sym.addr, 1)
-        (phoneSound, hasPhoneSound) = uisound_get_name_for_input(mo, thread, startAddr, anyValue, testValues)
+        (phoneSound, hasPhoneSound) = uisound_get_name_for_input(mo, thread, startAddr, anyValue, testValues, instrSet)
 
         if hasPhoneSound:            
             thread.memory.set(iphone_sound_sym.addr, 0)
-            podSound = uisound_get_name_for_input(mo, thread, startAddr, anyValue, testValues)[0]
+            podSound = uisound_get_name_for_input(mo, thread, startAddr, anyValue, testValues, instrSet)[0]
         else:
             podSound = '-'
             
@@ -269,9 +319,13 @@ def uisound_main(opts):
         cmsa1 = coreMediaMo.symbols.any1
         try:
             f_sym = msa1('name', '__Z24GetFileNameForThisActionmPcRb')
-            iphone_sound_sym = msa1('name', '__ZL12isPhoneSound')
-            cat_sym = cmsa('name', '_gSystemSoundIDToCategory') or cmsa1('name', '__ZL24gSystemSoundIDToCategory')
-            init_sym = cmsa('name', '_initializeCMSessionMgr') or cmsa1('name', '__ZL34cmsmInitializeSSIDCategoryMappingsv')
+            iphone_sound_sym = mo.symbols.any('name', '__ZL12isPhoneSound') or \
+                               msa1('name', '_isPhoneSound')
+            cat_sym = cmsa('name', '_gSystemSoundIDToCategory') or \
+                      cmsa1('name', '__ZL24gSystemSoundIDToCategory')
+            init_sym = cmsa('name', '_initializeCMSessionMgr') or \
+                       cmsa('name', '__ZL34cmsmInitializeSSIDCategoryMappingsv') or \
+                       cmsa1('name', '__Z34cmsmInitializeSSIDCategoryMappingsv')
         except KeyError as e:
             print("Error: Symbol '{0}' not found.".format(e.args[0]))
             return
