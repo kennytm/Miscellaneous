@@ -58,7 +58,7 @@
 // END LEGALESE
 //------------------------------------------------------------------------------
 
-// g++ -o dyld_decache -O3 -Wall -Wextra -std=c++98 /opt/local/lib/libboost_filesystem.a /opt/local/lib/libboost_system.a dyld_decache.cpp DataFile.cpp
+// g++ -o dyld_decache -O3 -Wall -Wextra -std=c++98 /usr/local/lib/libboost_filesystem-mt.a /usr/local/lib/libboost_system-mt.a dyld_decache.cpp DataFile.cpp
 
 #include <unistd.h>
 #include <cstdio>
@@ -986,7 +986,7 @@ private:
     void print_usage(char* path) const {
         const char* progname = path ? strrchr(path, '/')+1 : "dyld_decache";
         printf(
-            "dyld_decache v0.1a\n"
+            "dyld_decache v0.1b\n"
             "Usage:\n"
             "  %s [-p] [-o folder] [-f name [-f name] ...] path/to/dyld_shared_cache_armvX\n"
             "\n"
@@ -1061,6 +1061,7 @@ private:
     			unsigned addr = _f->read_uleb128<unsigned>() + bias;
     			exports.insert(std::make_pair(addr, prefix));
     		}
+    		_f->seek(cur + term_size + 1);
     		unsigned char child_count = static_cast<unsigned char>(_f->read_char());
     		off_t last_pos;
     		for (unsigned char i = 0; i < child_count; ++ i) {
