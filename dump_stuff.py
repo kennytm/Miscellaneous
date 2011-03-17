@@ -137,7 +137,7 @@ class UISoundCoreMediaOnBranch(object):
                 retval = 0
                 if isinstance(keysPtr, int):
                     keysSym = msa('addr', keysPtr)
-                    if keysSym is not None and keysSym.name.startswith('_ssids'):
+                    if keysSym is not None and 'ssids' in keysSym.name:
                         tmg = thread.memory.get
                         msall = self.msall
                         
@@ -265,12 +265,13 @@ def uisound_fill_categories(mo, cat_addr, init_sym):
 def uisound_main(opts):
     with MachOLoader(opts.audioToolbox, opts.coreMedia, arch=opts.arch, sdk=opts.sdk, cache=opts.cache) as (mo, coreMediaMo):
         msa1 = mo.symbols.any1
+        cmsa = coreMediaMo.symbols.any
         cmsa1 = coreMediaMo.symbols.any1
         try:
             f_sym = msa1('name', '__Z24GetFileNameForThisActionmPcRb')
             iphone_sound_sym = msa1('name', '__ZL12isPhoneSound')
-            cat_sym = cmsa1('name', '_gSystemSoundIDToCategory')
-            init_sym = cmsa1('name', '_initializeCMSessionMgr')
+            cat_sym = cmsa('name', '_gSystemSoundIDToCategory') or cmsa1('name', '__ZL24gSystemSoundIDToCategory')
+            init_sym = cmsa('name', '_initializeCMSessionMgr') or cmsa1('name', '__ZL34cmsmInitializeSSIDCategoryMappingsv')
         except KeyError as e:
             print("Error: Symbol '{0}' not found.".format(e.args[0]))
             return
