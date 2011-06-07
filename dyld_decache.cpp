@@ -160,6 +160,10 @@ struct load_command {
 #define	LC_DYLD_INFO 	0x22
 #define	LC_DYLD_INFO_ONLY (0x22|LC_REQ_DYLD)
 #define LC_LOAD_UPWARD_DYLIB (0x23|LC_REQ_DYLD)
+#define LC_VERSION_MIN_MACOSX 0x24
+#define LC_VERSION_MIN_IPHONEOS 0x25
+#define LC_FUNCTION_STARTS 0x26
+#define LC_DYLD_ENVIRONMENT 0x27
 
 struct segment_command : public load_command {
 	char		segname[16];
@@ -671,7 +675,9 @@ class DecachingFile : public MachOFile {
                lazy_bind_off, export_off,            // dyld_info
              symoff, stroff,                         // symtab
              tocoff, modtaboff, extrefsymoff,
-               indirectsymoff, extreloff, locreloff; // dysymtab
+               indirectsymoff, extreloff, locreloff, // dysymtab
+             dataoff,    // linkedit_data_command (dummy)
+               dataoff_cs, dataoff_ssi, dataoff_fs;
         long bind_size;
         int32_t strsize;
     } _new_linkedit_offsets;
@@ -812,9 +818,15 @@ private:
             */
 
             case LC_CODE_SIGNATURE:
-            case LC_SEGMENT_SPLIT_INFO: {
+            case LC_SEGMENT_SPLIT_INFO: 
+            case LC_FUNCTION_STARTS: {
                 linkedit_data_command ldcmd = *static_cast<const linkedit_data_command*>(cmd);
-                this->fix_offset(ldcmd.dataoff);
+                if (ldcmd.cmd == LC_CODE_SIGNATURE)
+                    ldcmd.dataoff = _new_linkedit_offsets.dataoff_cs;
+                else if (ldcmd.cmd == LC_SEGMENT_SPLIT_INFO)
+                    ldcmd.dataoff = _new_linkedit_offsets.dataoff_ssi;
+                else if (ldcmd.cmd == LC_FUNCTION_STARTS)
+                    ldcmd.dataoff = _new_linkedit_offsets.dataoff_fs;
                 fwrite(&ldcmd, sizeof(ldcmd), 1, _f);
                 break;
             }
@@ -986,7 +998,7 @@ private:
     void print_usage(char* path) const {
         const char* progname = path ? strrchr(path, '/')+1 : "dyld_decache";
         printf(
-            "dyld_decache v0.1b\n"
+            "dyld_decache v0.1c\n"
             "Usage:\n"
             "  %s [-p] [-o folder] [-f name [-f name] ...] path/to/dyld_shared_cache_armvX\n"
             "\n"
@@ -1373,6 +1385,20 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
             TRY_WRITE(indirectsymoff, nindirectsyms, 4);
             TRY_WRITE(extreloff, nextrel, 8);
             TRY_WRITE(locreloff, nlocrel, 8);
+            break;
+        }
+
+        case LC_CODE_SIGNATURE:
+        case LC_SEGMENT_SPLIT_INFO:
+        case LC_FUNCTION_STARTS: {
+            const linkedit_data_command* cmdvar = static_cast<const linkedit_data_command*>(cmd);
+            TRY_WRITE(dataoff, datasize, 1);
+            if (cmd->cmd == LC_CODE_SIGNATURE)
+                _new_linkedit_offsets.dataoff_cs = _new_linkedit_offsets.dataoff;
+            else if (cmd->cmd == LC_SEGMENT_SPLIT_INFO)
+                _new_linkedit_offsets.dataoff_ssi = _new_linkedit_offsets.dataoff;
+            else if (cmd->cmd == LC_FUNCTION_STARTS)
+                _new_linkedit_offsets.dataoff_fs = _new_linkedit_offsets.dataoff;
             break;
         }
     }
