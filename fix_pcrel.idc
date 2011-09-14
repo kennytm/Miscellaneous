@@ -62,9 +62,9 @@ static get_pc_rel_register(ea)
 
 /**
 Try to apply the PC-relative fix to the 'ea'.
-Returns 1 if some action is taken.
+Returns 1 when we want to stop the back-tracking.
 */
-static fix(ea, pc_addr, reg)
+static fix(ea, pc_addr, reg, movt_offset)
 {
     auto opcode, instr;
     opcode = GetMnem(ea);
@@ -72,8 +72,10 @@ static fix(ea, pc_addr, reg)
     if (opcode == "MOVT" || opcode == "movt")
     {
         if (is_op_register(instr[0], reg))
-            // bail out if we MOVT some nonzero number.
-            if (instr[1].type != o_imm || instr[1].value != 0)
+            // bail out if we MOVT some non-numbers.
+            if (instr[1].type == o_imm)
+                movt_offset = instr[1].value * 0x10000;
+            else
                 return 1;
     }
     else if (opcode == "MOV" || opcode == "mov" || opcode == "MOVW" || opcode == "movw")
@@ -81,7 +83,7 @@ static fix(ea, pc_addr, reg)
         if (is_op_register(instr[0], reg))
         {
             if (instr[1].type == o_imm)
-                OpOffEx(ea, 1, REF_OFF32|REFINFO_NOBASE, -1, pc_addr, 0);
+                OpOffEx(ea, 1, REF_OFF32|REFINFO_NOBASE, -1, pc_addr + movt_offset, 0);
             return 1;
         }
     }
@@ -90,11 +92,12 @@ static fix(ea, pc_addr, reg)
 
 static backtrack_fix_mov(reg, start, min)
 {
-    auto ea, pc_addr;
+    auto ea, pc_addr, movt_offset;
     pc_addr = start + (GetReg(start, "T") ? 4 : 8);
+    movt_offset = 0;
     for (ea = start; ea != BADADDR && ea + 100 >= start; ea = PrevHead(ea, min))
     {
-        if (fix(ea, pc_addr, reg))
+        if (fix(ea, pc_addr, reg, &movt_offset))
             break;
     }
 }
@@ -114,13 +117,13 @@ static fix_in_range(min, max)
 static main()
 {
     auto ea_min, ea_max, ea;
-    
+
     if (!is_arm())
         return;
-    
+
     ea_min = GetLongPrm(INF_MIN_EA);
     ea_max = GetLongPrm(INF_MAX_EA);
-    
+
     fix_in_range(ea_min, ea_max);
 }
 
