@@ -1,18 +1,18 @@
-#!/usr/bin/env python3.2
-#    
+#!/usr/bin/env python3
+#
 #    ipsw_decrypt.py ... Extract and decrypt all objects in an IPSW file.
-#    Copyright (C) 2011  KennyTM~ <kennytm@gmail.com>
-#    
+#    Copyright (C) 2012  KennyTM~ <kennytm@gmail.com>
+#
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
 #    the Free Software Foundation, either version 3 of the License, or
 #    (at your option) any later version.
-#    
+#
 #    This program is distributed in the hope that it will be useful,
 #    but WITHOUT ANY WARRANTY; without even the implied warranty of
 #    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #    GNU General Public License for more details.
-#    
+#
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
@@ -33,23 +33,24 @@ from lzss import decompressor
 
 
 class TemporaryDirectory(object):
-    def __init__(self):
+    def __init__(self, dir):
         self._should_del = True
+        self._dir = dir
         pass
-        
+
     def __enter__(self):
-        self._tempdir = mkdtemp()
+        self._tempdir = mkdtemp(dir=self._dir)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._should_del:
             shutil.rmtree(self._tempdir)
-            
+
     def move(self, target_dir):
         os.rename(self._tempdir, target_dir)
         self._should_del = False
         self._tempdir = target_dir
-        
+
     @property
     def directory(self):
         return self._tempdir
@@ -57,41 +58,50 @@ class TemporaryDirectory(object):
 
 def parse_options():
     parser = ArgumentParser()
-    parser.add_argument('--version', action='version', version='ipsw_decrypt 0.0')
+    parser.add_argument('--version', action='version', version='ipsw_decrypt 0.1')
     parser.add_argument('-u', '--url', help='the URL to download the decryption keys.')
     parser.add_argument('-d', '--vfdecrypt', help='location where "vfdecrypt" binary is installed.', default='vfdecrypt')
     parser.add_argument('-o', '--output', help='the directory where the extracted files are placed to.')
     parser.add_argument('filename', help='path to the IPSW file', nargs='?')
     options = parser.parse_args()
-    
+
     if not options.filename and not (options.output and os.path.isdir(options.output)):
         parser.error('Please supply the path to the IPSW file or an existing output directory that contains the extracted firmware.')
-    
+
     return options
 
 
 _products = {
     'AppleTV2,1': 'Apple TV 2G',
+    'AppleTV3,1': 'Apple TV 3G',
     'iPad1,1': 'iPad',
     'iPad2,1': 'iPad 2 Wi-Fi',
     'iPad2,2': 'iPad 2 GSM',
     'iPad2,3': 'iPad 2 CDMA',
+    'iPad2,4': 'iPad 2 Wi-Fi R2',
+    'iPad3,1': 'iPad 3 Wi-Fi',
+    'iPad3,2': 'iPad 3 CDMA',
+    'iPad3,3': 'iPad 3 Global',
     'iPhone1,1': 'iPhone',
     'iPhone1,2': 'iPhone 3G',
     'iPhone2,1': 'iPhone 3GS',
     'iPhone3,1': 'iPhone 4',
     'iPhone3,3': 'iPhone 4 CDMA',
+    'iPhone4,1': 'iPhone 4S',
+    'iPhone5,1': 'iPhone 5 GSM',
+    'iPhone5,2': 'iPhone 5 Global',
     'iPod1,1': 'iPod touch 1G',
     'iPod2,1': 'iPod touch 2G',
     'iPod3,1': 'iPod touch 3G',
     'iPod4,1': 'iPod touch 4G',
+    'iPod5,1': 'iPod touch 5G',
 }
 
 _parenthesis_sub = re.compile('\s|\([^)]+\)|\..+$').sub
 _key_matcher = re.compile('\s*([\w ]+):\s*([a-fA-F\d]+)').search
 
 def extract_zipfile(ipsw_path, output_dir):
-    with TemporaryDirectory() as td:
+    with TemporaryDirectory(dir=output_dir or ".") as td:
         print("<Info> Extracting content from {0}, it may take a minute...".format(ipsw_path))
         with closing(ZipFile(ipsw_path)) as zipfile:
             zipfile.extractall(td.directory)
@@ -103,12 +113,13 @@ def extract_zipfile(ipsw_path, output_dir):
             product_name = _products.get(product_type, product_type)
             version = plist_obj['ProductVersion']
             build = plist_obj['ProductBuildVersion']
-            
+
             output_dir = '{0}, {1} ({2})'.format(product_name, version, build)
-        
+
         td.move(output_dir)
+
         print("<Info> Extracted firmware to '{0}'. You may use the '-o \"{0}\"' switch in the future to skip this step.".format(output_dir))
-    
+
     return output_dir
 
 
@@ -124,12 +135,12 @@ def get_decryption_info(plist_obj, output_dir, url=None):
     product_type = plist_obj['SupportedProductTypes'][0]
     product_name = _products.get(product_type, product_type)
     version = plist_obj['ProductVersion']
-    
+
     build_info = plist_obj['BuildIdentities'][0]['Info']
     build_train = build_info['BuildTrain']
     build_number = build_info['BuildNumber']
     device_class = build_info['DeviceClass']
-    
+
     print("<Info> {0} ({1}), class {2}".format(product_name, product_type, device_class))
     print("<Info> iOS version {0}, build {1} {2}".format(version, build_train, build_number))
 
@@ -143,7 +154,7 @@ def get_decryption_info(plist_obj, output_dir, url=None):
     except IOError as e:
         print("<Error> {1}".format(url, e))
         return None
-        
+
     headers = htmldoc.iterfind('//h3/span[@class="mw-headline"]')
     key_map = {}
     for tag in headers:
@@ -166,9 +177,9 @@ def get_decryption_info(plist_obj, output_dir, url=None):
                     key_type += ' Key'
                 keys[key_type] = key_value
         key_map[header_name] = keys
-    
+
     print("<Info> Retrieved {0} keys.".format(len(key_map)))
-        
+
     return key_map
 
 
@@ -186,14 +197,14 @@ def decrypt_img3(filename, outputfn, keystring, ivstring, openssl='openssl'):
             print("<Warning> '{0}' is not a valid IMG3 file. Skipping.".format(basename))
             return
         f.seek(16, os.SEEK_CUR)
-        
+
         while True:
             tag = f.read(12)
             if not tag:
                 break
             (tag_type, total_len, data_len) = tag_unpack(tag)
             data_len &= ~15
-            
+
             if tag_type == b'ATAD':
                 print("<Info> Decrypting '{0}'... ".format(basename))
                 aes_len = str(len(keystring)*4)
@@ -214,10 +225,10 @@ def decrypt_img3(filename, outputfn, keystring, ivstring, openssl='openssl'):
                 if p.wait() != 0 or not os.path.exists(outputfn):
                     print("<Error> Decryption failed!")
                 return
-                
+
             else:
                 f.seek(total_len - 12, os.SEEK_CUR)
-                
+
         print("<Warning> Nothing was decrypted from '{0}'".format(basename))
 
 
@@ -253,7 +264,7 @@ def build_file_decryption_map(plist_obj, key_map, output_dir):
                     continue
             elif key_lower.startswith('restore') and key_lower != 'restoreramdisk':
                 continue
-                
+
             path = os.path.join(output_dir, content['Info']['Path'])
             dec_path = decrypted_filename(path)
 
@@ -266,7 +277,7 @@ def build_file_decryption_map(plist_obj, key_map, output_dir):
                 skip_reason = 'No decryption key'
             elif not os.path.exists(path):
                 skip_reason = 'File does not exist'
-                    
+
             if skip_reason:
                 print("<{3}> Skipping {0} ({1}): {2}".format(key, os.path.split(content['Info']['Path'])[1], skip_reason, level))
             else:
@@ -279,10 +290,10 @@ def build_file_decryption_map(plist_obj, key_map, output_dir):
 def main():
     options = parse_options()
     filename = options.filename
-        
+
     output_dir = options.output
     should_extract = True
-    
+
     if output_dir and os.path.isdir(output_dir):
         build_manifest_file = os.path.join(output_dir, 'BuildManifest.plist')
         if os.path.exists(build_manifest_file):
@@ -290,8 +301,8 @@ def main():
             should_extract = False
         else:
             print("<Warning> Output directory '{0}' already exists.".format(output_dir))
-        
-        
+
+
     if should_extract:
         if not filename:
             print("<Error> Please supply the path to the IPSW file.")
@@ -303,7 +314,7 @@ def main():
 
     key_map = get_decryption_info(plist_obj, output_dir, options.url)
     file_key_map = build_file_decryption_map(plist_obj, key_map, output_dir)
-    
+
     for filename, info in file_key_map.items():
         keys = info['keys']
         dec_path = info['dec_path']
@@ -312,13 +323,13 @@ def main():
             decrypt_img3(filename, info['dec_path'], keys['Key'], keys['IV'])
         elif 'VFDecrypt Key' in keys:
             vfdecrypt(filename, info['dec_path'], keys['VFDecrypt Key'], options.vfdecrypt)
-    
+
         if os.path.exists(dec_path):
             try:
-                fin = open(dec_path, 'rb')     
+                fin = open(dec_path, 'rb')
                 decomp_func = decompressor(fin)
                 if decomp_func is not None:
-                    with NamedTemporaryFile() as fout:
+                    with NamedTemporaryFile(dir=output_dir) as fout:
                         decomp_func(fin, fout, report_progress=True)
                         fin.close()
                         fin = None
@@ -329,7 +340,7 @@ def main():
                 if fin:
                     fin.close()
 
-    
+
 if __name__ == '__main__':
     main()
-    
+
