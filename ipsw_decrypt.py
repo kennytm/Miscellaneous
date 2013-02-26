@@ -85,7 +85,7 @@ _products = {
     'iPhone1,1': 'iPhone',
     'iPhone1,2': 'iPhone 3G',
     'iPhone2,1': 'iPhone 3GS',
-    'iPhone3,1': 'iPhone 4',
+    'iPhone3,1': 'iPhone 4 GSM',
     'iPhone3,3': 'iPhone 4 CDMA',
     'iPhone4,1': 'iPhone 4S',
     'iPhone5,1': 'iPhone 5 GSM',
@@ -155,7 +155,7 @@ def get_decryption_info(plist_obj, output_dir, url=None):
         print("<Error> {1}".format(url, e))
         return None
 
-    headers = htmldoc.iterfind('//h3/span[@class="mw-headline"]')
+    headers = htmldoc.iterfind('//h2/span[@class="mw-headline"]')
     key_map = {}
     for tag in headers:
         header_name = _parenthesis_sub('', tag.text_content()).strip().lower()
