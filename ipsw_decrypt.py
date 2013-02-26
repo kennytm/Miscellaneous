@@ -155,7 +155,7 @@ def get_decryption_info(plist_obj, output_dir, url=None):
         print("<Error> {1}".format(url, e))
         return None
 
-    headers = htmldoc.iterfind('//h3/span[@class="mw-headline"]')
+    headers = htmldoc.iterfind('//h2/span[@class="mw-headline"]')
     key_map = {}
     for tag in headers:
         header_name = _parenthesis_sub('', tag.text_content()).strip().lower()
