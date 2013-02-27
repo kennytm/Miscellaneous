@@ -100,6 +100,28 @@ _products = {
 _parenthesis_sub = re.compile('\s|\([^)]+\)|\..+$').sub
 _key_matcher = re.compile('\s*([\w ]+):\s*([a-fA-F\d]+)').search
 
+def readBuildManifest(directory):
+    build_manifest_file = os.path.join(directory, 'BuildManifesto.plist')
+    if not os.path.exists(build_manifest_file):
+        build_manifest_file = os.path.join(directory, 'BuildManifest.plist')
+
+    try:
+        plist_obj = readPlist(build_manifest_file)
+    except IOError:
+        restore_plist = readPlist(os.path.join(directory, 'Restore.plist'))
+        version = restore_plist['ProductVersion']
+        build = restore_plist['ProductBuildVersion']
+
+        build_trains = {'1.0': 'Heavenly', '1.0.1': 'SUHeavenlyJuly', '1.0.2': 'SUHeavenlyJuly', '1.1': 'Snowbird', '1.1.1': 'Snowbird', '1.1.2': 'Oktoberfest', '1.1.3': 'Little Bear', '1.1.4': 'Little Bear',
+                        '2.0': 'Big Bear', '2.0.1': 'Big Bear', '2.0.2': 'Big Bear', '2.1': 'Sugar Bowl', '2.2': 'Timberline', '2.2.1': 'SUTimberline'}
+        info = {'BuildTrain': build_trains[version], 'BuildNumber': build, 'DeviceClass': 'N/A', 'RestoreBehavior': ''}
+        plist_obj = {'SupportedProductTypes': [restore_plist['ProductType']],
+                     'ProductVersion': version,
+                     'ProductBuildVersion': build,
+                     'BuildIdentities': [{'Info': info, 'Manifest': {'OS': {'Info': {'Path': restore_plist['SystemRestoreImages']['User']}}}}]}
+
+    return plist_obj
+
 def extract_zipfile(ipsw_path, output_dir):
     with TemporaryDirectory(dir=output_dir or ".") as td:
         print("<Info> Extracting content from {0}, it may take a minute...".format(ipsw_path))
@@ -107,8 +129,7 @@ def extract_zipfile(ipsw_path, output_dir):
             zipfile.extractall(td.directory)
 
         if output_dir is None:
-            build_manifest_file = os.path.join(td.directory, 'BuildManifest.plist')
-            plist_obj = readPlist(build_manifest_file)
+            plist_obj = readBuildManifest(td.directory)
             product_type = plist_obj['SupportedProductTypes'][0]
             product_name = _products.get(product_type, product_type)
             version = plist_obj['ProductVersion']
@@ -145,7 +166,7 @@ def get_decryption_info(plist_obj, output_dir, url=None):
     print("<Info> iOS version {0}, build {1} {2}".format(version, build_train, build_number))
 
     if url is None:
-        url = 'http://theiphonewiki.com/wiki/index.php?title={0}_{1}_({2})'.format(build_train, build_number, product_name.translate({0x20:'_'}))
+        url = 'http://theiphonewiki.com/wiki/index.php?title={0}_{1}_({2})'.format(build_train.translate({0x20:'_'}), build_number, product_name.translate({0x20:'_'}))
 
     print("<Info> Downloading decryption keys from '{0}'...".format(url))
 
@@ -309,8 +330,7 @@ def main():
             return
         output_dir = extract_zipfile(filename, output_dir)
 
-    build_manifest_file = os.path.join(output_dir, 'BuildManifest.plist')
-    plist_obj = readPlist(build_manifest_file)
+    plist_obj = readBuildManifest(output_dir)
 
     key_map = get_decryption_info(plist_obj, output_dir, options.url)
     file_key_map = build_file_decryption_map(plist_obj, key_map, output_dir)
