@@ -690,7 +690,7 @@ private:
     std::vector<FileoffFixup> _fixups;
     std::vector<segment_command> _new_segments;
     ExtraStringRepository _extra_text, _extra_data;
-    std::vector<uint32_t> _entsize12_patches, _nullify_patches;
+    std::vector<uint32_t> _nullify_patches;
     ExtraBindRepository _extra_bind;
 
 private:
@@ -907,7 +907,6 @@ private:
         _extra_text.foreach_entry(this, &DecachingFile::patch_objc_sects_callback);
         _extra_data.foreach_entry(this, &DecachingFile::patch_objc_sects_callback);
 
-        this->patch_objc_sects_callback(NULL, 0, sizeof(method_t), _entsize12_patches);
         this->patch_objc_sects_callback(NULL, 0, 0, _nullify_patches);
 
         if (_imageinfo_address) {
@@ -1437,11 +1436,6 @@ void DecachingFile::prepare_patch_objc_methods(uint32_t method_vmaddr, uint32_t 
         size_t size = 8 + sizeof(method_t)*count;
         _extra_data.insert(_context->_f->peek_data_at<char>(method_offset), size, override_vmaddr);
     }
-
-    // add the patch to make sure the method_t's entsize is 12.
-    //  (this causes class-dump-3.3.3 to raise an exception)
-    if (wrong_entsize)
-        _entsize12_patches.push_back(method_vmaddr);
 
     const method_t* methods = _context->_f->peek_data<method_t>();
     for (uint32_t j = 0; j < count; ++ j) {
