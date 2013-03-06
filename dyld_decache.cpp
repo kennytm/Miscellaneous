@@ -326,6 +326,11 @@ struct method_t {
     uint32_t imp;
 };
 
+struct property_t {
+    uint32_t name;
+    uint32_t attributes;
+};
+
 struct protocol_t {
     uint32_t isa;
     uint32_t name;
@@ -889,7 +894,8 @@ private:
         return std::make_pair(-1, ~0u);
     }
 
-    void prepare_patch_objc_methods(uint32_t method_vmaddr, uint32_t override_vmaddr);
+    template <typename T>
+    void prepare_patch_objc_list(uint32_t list_vmaddr, uint32_t override_vmaddr);
     void prepare_objc_extrastr(const segment_command* segcmd);
 
     void get_address_info(uint32_t vmaddr, std::string* p_name, int* p_libord) const;
@@ -1422,26 +1428,30 @@ void DecachingFile::add_extlink_to(uint32_t vmaddr, uint32_t override_vmaddr) {
     _nullify_patches.push_back(override_vmaddr);
 }
 
-void DecachingFile::prepare_patch_objc_methods(uint32_t method_vmaddr, uint32_t override_vmaddr) {
-    if (!method_vmaddr)
+template <typename T>
+void DecachingFile::prepare_patch_objc_list(uint32_t list_vmaddr, uint32_t override_vmaddr) {
+    if (!list_vmaddr)
         return;
 
-    off_t method_offset = _context->from_vmaddr(method_vmaddr);
-    _context->_f->seek(method_offset);
-    bool wrong_entsize = _context->_f->copy_data<uint32_t>() != sizeof(method_t);
+    off_t offset = _context->from_vmaddr(list_vmaddr);
+    _context->_f->seek(offset);
+    uint32_t entsize = _context->_f->copy_data<uint32_t>() & ~(uint32_t)3;
     uint32_t count = _context->_f->copy_data<uint32_t>();
 
-    if (!this->contains_address(method_vmaddr)) {
-        method_vmaddr = _extra_data.next_vmaddr();
-        size_t size = 8 + sizeof(method_t)*count;
-        _extra_data.insert(_context->_f->peek_data_at<char>(method_offset), size, override_vmaddr);
+    if (entsize != sizeof(T))
+        throw TRException("DecachingFile::prepare_patch_objc_list():\n\tWrong entsize: %u instead of %lu\n", entsize, sizeof(T));
+
+    if (!this->contains_address(list_vmaddr)) {
+        list_vmaddr = _extra_data.next_vmaddr();
+        size_t size = 8 + sizeof(T)*count;
+        _extra_data.insert(_context->_f->peek_data_at<char>(offset), size, override_vmaddr);
     }
 
-    const method_t* methods = _context->_f->peek_data<method_t>();
+    const T* objects = _context->_f->peek_data<T>();
     for (uint32_t j = 0; j < count; ++ j) {
-        if (!this->contains_address(methods[j].name)) {
-            const char* the_string = _context->peek_char_at_vmaddr(methods[j].name);
-            _extra_text.insert(the_string, method_vmaddr + 8 + sizeof(method_t)*j);
+        if (!this->contains_address(objects[j].name)) {
+            const char* the_string = _context->peek_char_at_vmaddr(objects[j].name);
+            _extra_text.insert(the_string, list_vmaddr + 8 + sizeof(T)*j);
         }
     }
 }
@@ -1466,23 +1476,25 @@ void DecachingFile::prepare_objc_extrastr(const segment_command* segcmd) {
                     const class_t* class_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_vmaddr));
                     this->add_extlink_to(class_obj->superclass, class_vmaddr + offsetof(class_t, superclass));
                     const class_ro_t* class_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(class_obj->data));
-                    this->prepare_patch_objc_methods(class_data->baseMethods, class_obj->data + offsetof(class_ro_t, baseMethods));
+                    this->prepare_patch_objc_list<method_t>(class_data->baseMethods, class_obj->data + offsetof(class_ro_t, baseMethods));
+                    this->prepare_patch_objc_list<property_t>(class_data->baseProperties, class_obj->data + offsetof(class_ro_t, baseProperties));
                     
                     const class_t* metaclass_obj = reinterpret_cast<const class_t*>(_context->peek_char_at_vmaddr(class_obj->isa));
                     this->add_extlink_to(metaclass_obj->isa, class_obj->isa + offsetof(class_t, isa));
                     this->add_extlink_to(metaclass_obj->superclass, class_obj->isa + offsetof(class_t, superclass));
                     const class_ro_t* metaclass_data = reinterpret_cast<const class_ro_t*>(_context->peek_char_at_vmaddr(metaclass_obj->data));
-                    this->prepare_patch_objc_methods(metaclass_data->baseMethods, metaclass_obj->data + offsetof(class_ro_t, baseMethods));
+                    this->prepare_patch_objc_list<method_t>(metaclass_data->baseMethods, metaclass_obj->data + offsetof(class_ro_t, baseMethods));
+                    this->prepare_patch_objc_list<property_t>(metaclass_data->baseProperties, metaclass_obj->data + offsetof(class_ro_t, baseProperties));
                 }
             } else if (streq(sect.sectname, "__objc_protolist")) {
                 const uint32_t* protos = _context->_f->peek_data_at<uint32_t>(sect.offset);
                 for (uint32_t j = 0; j < sect.size/4; ++ j) {
                     uint32_t proto_vmaddr = protos[j];
                     const protocol_t* proto_obj = reinterpret_cast<const protocol_t*>(_context->peek_char_at_vmaddr(proto_vmaddr));
-                    this->prepare_patch_objc_methods(proto_obj->instanceMethods, proto_vmaddr + offsetof(protocol_t, instanceMethods));
-                    this->prepare_patch_objc_methods(proto_obj->classMethods, proto_vmaddr + offsetof(protocol_t, classMethods));
-                    this->prepare_patch_objc_methods(proto_obj->optionalInstanceMethods, proto_vmaddr + offsetof(protocol_t, optionalInstanceMethods));
-                    this->prepare_patch_objc_methods(proto_obj->optionalClassMethods, proto_vmaddr + offsetof(protocol_t, optionalClassMethods));
+                    this->prepare_patch_objc_list<method_t>(proto_obj->instanceMethods, proto_vmaddr + offsetof(protocol_t, instanceMethods));
+                    this->prepare_patch_objc_list<method_t>(proto_obj->classMethods, proto_vmaddr + offsetof(protocol_t, classMethods));
+                    this->prepare_patch_objc_list<method_t>(proto_obj->optionalInstanceMethods, proto_vmaddr + offsetof(protocol_t, optionalInstanceMethods));
+                    this->prepare_patch_objc_list<method_t>(proto_obj->optionalClassMethods, proto_vmaddr + offsetof(protocol_t, optionalClassMethods));
                 }
             } else if (streq(sect.sectname, "__objc_catlist")) {
                 const uint32_t* cats = _context->_f->peek_data_at<uint32_t>(sect.offset);
@@ -1490,8 +1502,8 @@ void DecachingFile::prepare_objc_extrastr(const segment_command* segcmd) {
                     uint32_t cat_vmaddr = cats[j];
                     const category_t* cat_obj = reinterpret_cast<const category_t*>(_context->peek_char_at_vmaddr(cat_vmaddr));
                     this->add_extlink_to(cat_obj->cls, cat_vmaddr + offsetof(category_t, cls));
-                    this->prepare_patch_objc_methods(cat_obj->instanceMethods, cat_vmaddr + offsetof(category_t, instanceMethods));
-                    this->prepare_patch_objc_methods(cat_obj->classMethods, cat_vmaddr + offsetof(category_t, classMethods));
+                    this->prepare_patch_objc_list<method_t>(cat_obj->instanceMethods, cat_vmaddr + offsetof(category_t, instanceMethods));
+                    this->prepare_patch_objc_list<method_t>(cat_obj->classMethods, cat_vmaddr + offsetof(category_t, classMethods));
                 }
             } else if (streq(sect.sectname, "__objc_imageinfo")) {
                 _imageinfo_address = sect.addr + 4;
