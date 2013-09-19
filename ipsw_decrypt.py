@@ -194,7 +194,7 @@ def get_decryption_info(plist_obj, output_dir, url=None):
             if m:
                 (key_type, key_value) = m.groups()
                 key_type = key_type.strip()
-                if key_type == 'VFDecrypt':
+                if key_type == 'RootFS':
                     key_type += ' Key'
                 keys[key_type] = key_value
         key_map[header_name] = keys
@@ -341,8 +341,8 @@ def main():
 
         if 'Key' in keys and 'IV' in keys:
             decrypt_img3(filename, info['dec_path'], keys['Key'], keys['IV'])
-        elif 'VFDecrypt Key' in keys:
-            vfdecrypt(filename, info['dec_path'], keys['VFDecrypt Key'], options.vfdecrypt)
+        elif 'RootFS Key' in keys:
+            vfdecrypt(filename, info['dec_path'], keys['RootFS Key'], options.vfdecrypt)
 
         if os.path.exists(dec_path):
             try:
