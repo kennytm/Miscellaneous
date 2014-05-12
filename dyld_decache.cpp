@@ -419,7 +419,6 @@ class ExtraStringRepository {
 
     boost::unordered_map<const char*, int> _indices;
     std::vector<Entry> _entries;
-    size_t _total_size;
 
     section _template;
 
@@ -463,7 +462,7 @@ public:
     }
 
     void increase_size_by(size_t delta) { _template.size += delta; }
-    size_t total_size() const { return _template.size; }
+    uint32_t total_size() const { return _template.size; }
     bool has_content() const { return _template.size != 0; }
 
     // Get the 'section' structure for the extra section this repository
@@ -502,7 +501,7 @@ public:
         }
     }
     
-    long optimize_and_write(FILE* f) {
+    uint32_t optimize_and_write(FILE* f) {
         typedef boost::unordered_map<uint32_t, Entry>::value_type V;
         typedef boost::unordered_map<int, std::vector<const Entry*> > M;
         typedef std::pair<int, uint32_t> P;
@@ -517,7 +516,7 @@ public:
         
         fputc(BIND_OPCODE_SET_TYPE_IMM | 1, f);
         
-        long size = 1;
+        uint32_t size = 1;
         BOOST_FOREACH(const M::value_type& pair, entries_by_libord) {
             int libord = pair.first;
             if (libord < 0x10) {
@@ -676,15 +675,15 @@ class DecachingFile : public MachOFile {
     };
 
     struct {
-        long rebase_off, bind_off, weak_bind_off,
+        uint32_t rebase_off, bind_off, weak_bind_off,
                lazy_bind_off, export_off,            // dyld_info
              symoff, stroff,                         // symtab
              tocoff, modtaboff, extrefsymoff,
                indirectsymoff, extreloff, locreloff, // dysymtab
              dataoff,    // linkedit_data_command (dummy)
                dataoff_cs, dataoff_ssi, dataoff_fs;
-        long bind_size;
-        int32_t strsize;
+        uint32_t bind_size;
+        uint32_t strsize;
     } _new_linkedit_offsets;
 
 private:
@@ -1202,7 +1201,7 @@ public:
         _macho_files.clear();
         for (uint32_t i = 0; i < _header->imagesCount; ++ i) {
             const mach_header* mh = _f->peek_data_at<mach_header>(this->from_vmaddr(_images[i].address));
-            _macho_files.push_back(MachOFile(mh, this, _images[i].address));
+            _macho_files.push_back(MachOFile(mh, this, static_cast<uint32_t>(_images[i].address)));
         }
         
         for (uint32_t i = 0; i < _header->imagesCount; ++ i) {
@@ -1283,7 +1282,7 @@ void DecachingFile::write_segment_content(const segment_command* segcmd) {
         ExtraStringRepository* repo = this->repo_for_segname(segcmd->segname);
 
         const char* data_ptr = _context->peek_char_at_vmaddr(segcmd->vmaddr);
-        long new_fileoff = ftell(_f);
+        uint32_t new_fileoff = static_cast<uint32_t>(ftell(_f));
 
         fwrite(data_ptr, 1, segcmd->filesize, _f);
         uint32_t filesize = segcmd->filesize;
@@ -1314,8 +1313,8 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
     //  and pad to make sure the beginning is aligned with 'objsize' boundary.
     #define TRY_WRITE(offmem, countmem, objsize) \
         if (cmdvar->offmem && cmdvar->countmem) { \
-            long curloc = ftell(_f); \
-            long extra = curloc % objsize; \
+            uint32_t curloc = static_cast<uint32_t>(ftell(_f)); \
+            uint32_t extra = curloc % objsize; \
             if (extra != 0) { \
                 char padding[objsize] = {0}; \
                 fwrite(padding, 1, objsize-extra, _f); \
@@ -1333,8 +1332,8 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
         case LC_DYLD_INFO_ONLY: {
             const dyld_info_command* cmdvar = static_cast<const dyld_info_command*>(cmd);
             TRY_WRITE(rebase_off, rebase_size, 1);
-            long curloc = ftell(_f);
-            long extra_size = _extra_bind.optimize_and_write(_f);
+            uint32_t curloc = static_cast<uint32_t>(ftell(_f));
+            uint32_t extra_size = _extra_bind.optimize_and_write(_f);
             TRY_WRITE(bind_off, bind_size, 1);
             _new_linkedit_offsets.bind_off = curloc;
             _new_linkedit_offsets.bind_size += extra_size;
@@ -1351,7 +1350,7 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
             //  take those strings which are used by the symbol.
             const symtab_command* cmdvar = static_cast<const symtab_command*>(cmd);
             if (cmdvar->symoff && cmdvar->nsyms) {
-                _new_linkedit_offsets.stroff = ftell(_f);
+                _new_linkedit_offsets.stroff = static_cast<uint32_t>(ftell(_f));
 
                 nlist* syms = new nlist[cmdvar->nsyms];
                 memcpy(syms, _context->_f->peek_data_at<nlist>(cmdvar->symoff), sizeof(*syms) * cmdvar->nsyms);
@@ -1366,8 +1365,8 @@ void DecachingFile::write_real_linkedit(const load_command* cmd) {
                 }
                 _new_linkedit_offsets.strsize = cur_strx;
 
-                long curloc = ftell(_f);
-                long extra = curloc % sizeof(nlist);
+                uint32_t curloc = static_cast<uint32_t>(ftell(_f));
+                uint32_t extra = curloc % sizeof(nlist);
                 if (extra != 0) {
                     char padding[sizeof(nlist)] = {0};
                     fwrite(padding, 1, sizeof(nlist)-extra, _f);
