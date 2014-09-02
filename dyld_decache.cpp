@@ -351,6 +351,25 @@ struct category_t {
     uint32_t instanceProperties;
 };
 
+struct uuid_command : load_command {
+	uint8_t byte0;
+	uint8_t byte1;
+	uint8_t byte2;
+	uint8_t byte3;
+	uint8_t byte4;
+	uint8_t byte5;
+	uint8_t byte6;
+	uint8_t byte7;
+	uint8_t byte8;
+	uint8_t byte9;
+	uint8_t byte10;
+	uint8_t byte11;
+	uint8_t byte12;
+	uint8_t byte13;
+	uint8_t byte14;
+	uint8_t byte15;
+};
+
 #define BIND_OPCODE_MASK					0xF0
 #define BIND_IMMEDIATE_MASK					0x0F
 #define BIND_OPCODE_DONE					0x00
@@ -575,6 +594,7 @@ protected:
     const ProgramContext* _context;
     std::vector<const segment_command*> _segments;
     uint32_t _image_vmaddr;
+	std::string _uuid;
     
 private:
     boost::unordered_map<std::string, int> _libords;
@@ -606,6 +626,7 @@ protected:
 
 private:
     void retrieve_segments_and_libords(const load_command* cmd);
+    void retrieve_uuid(const load_command* cmd);
 
 public:
     // Checks if the VM address is included in the decached file _before_
@@ -621,10 +642,22 @@ public:
     MachOFile(const mach_header* header, const ProgramContext* context, uint32_t image_vmaddr = 0)
         : _header(header), _context(context), _image_vmaddr(image_vmaddr), _cur_libord(0)
     {
-        if (header->magic != 0xfeedface)
+	}
+
+	void prepare_for_save()
+	{
+        if (_header->magic != 0xfeedface)
             return;
 
         this->foreach_command(&MachOFile::retrieve_segments_and_libords);
+    }
+
+	void find_uuid()
+	{
+        if (_header->magic != 0xfeedface)
+            return;
+
+        this->foreach_command(&MachOFile::retrieve_uuid);
     }
 
     const mach_header* header() const { return _header; }
@@ -644,6 +677,10 @@ public:
         else
             return "";
     }
+
+	char const * uuid() const {
+		return _uuid.c_str();
+	}
 };
 
 // This class represents one file going to be decached.
@@ -983,6 +1020,7 @@ class ProgramContext {
     char* _filename;
     DataFile* _f;
     bool _printmode;
+    bool _uuidmode;
     std::vector<boost::filesystem::path> _namefilters;
     boost::unordered_map<const mach_header*, boost::filesystem::path> _already_dumped;
 
@@ -996,7 +1034,8 @@ public:
         _folder("libraries"),
         _filename(NULL),
         _f(NULL),
-        _printmode(false)
+        _printmode(false),
+        _uuidmode(false)
     {}
 
 private:
@@ -1005,11 +1044,12 @@ private:
         printf(
             "dyld_decache v0.1c\n"
             "Usage:\n"
-            "  %s [-p] [-o folder] [-f name [-f name] ...] path/to/dyld_shared_cache_armvX\n"
+            "  %s [-p] [-u] [-o folder] [-f name [-f name] ...] path/to/dyld_shared_cache_armvX\n"
             "\n"
             "Options:\n"
             "  -o folder : Extract files into 'folder'. Default to './libraries'\n"
             "  -p        : Print the content of the cache file and exit.\n"
+            "  -u        : Print the content and UUIDs of the cache file and exit.\n"
             "  -f name   : Only extract the file with filename 'name', e.g. '-f UIKit' or\n"
             "              '-f liblockdown'. This option may be specified multiple times to\n"
             "              extract more than one file. If not specified, all files will be\n"
@@ -1020,13 +1060,16 @@ private:
     void parse_options(int argc, char* argv[]) {
         int opt;
 
-        while ((opt = getopt(argc, argv, "o:plf:")) != -1) {
+        while ((opt = getopt(argc, argv, "o:pulf:")) != -1) {
             switch (opt) {
                 case 'o':
                     _folder = optarg;
                     break;
                 case 'p':
                     _printmode = true;
+                    break;
+                case 'u':
+                    _uuidmode = true;
                     break;
                 case 'f':
                     _namefilters.push_back(remove_all_extensions(optarg));
@@ -1141,6 +1184,8 @@ public:
     
     bool is_print_mode() const { return _printmode; }
 
+    bool is_uuid_mode() const { return _uuidmode; }
+
     const char* path_of_image(uint32_t i) const {
         return _f->peek_data_at<char>(_images[i].pathFileOffset);
     }
@@ -1202,16 +1247,37 @@ public:
         _macho_files.clear();
         for (uint32_t i = 0; i < _header->imagesCount; ++ i) {
             const mach_header* mh = _f->peek_data_at<mach_header>(this->from_vmaddr(_images[i].address));
-            _macho_files.push_back(MachOFile(mh, this, _images[i].address));
+            MachOFile file = MachOFile(mh, this, _images[i].address);
+			file.prepare_for_save();
+            _macho_files.push_back(file);
         }
-        
+
         for (uint32_t i = 0; i < _header->imagesCount; ++ i) {
             if (!this->should_skip_image(i)) {
                 this->save_complete_image(i);
             }
         }
     }
-    
+
+    void print_uuids() {
+        _macho_files.clear();
+        for (uint32_t i = 0; i < _header->imagesCount; ++ i) {
+            const mach_header* mh = _f->peek_data_at<mach_header>(this->from_vmaddr(_images[i].address));
+            MachOFile file = MachOFile(mh, this, _images[i].address);
+			file.find_uuid();
+            _macho_files.push_back(file);
+        }
+
+        printf(
+            "Images (%d):\n"
+            "  ---------address  --------------------------------uuid  filename\n"
+        , _header->imagesCount);
+
+        for (uint32_t i = 0; i < _header->imagesCount; ++ i) {
+            printf("  %16llx  %s  %s\n", _images[i].address, _macho_files[i].uuid(), this->path_of_image(i));
+        }
+    }
+
     void print_info() const {
         printf(
             "magic = \"%-.16s\", dyldBaseAddress = 0x%llx\n"
@@ -1275,6 +1341,23 @@ void MachOFile::retrieve_segments_and_libords(const load_command* cmd) {
             }
             break;
         }
+    }
+}
+
+void MachOFile::retrieve_uuid(const load_command* cmd) {
+    switch (cmd->cmd) {
+        default:
+            break;
+		case LC_UUID:
+			const uuid_command* uuidcmd = static_cast<const uuid_command*>(cmd);
+			char uuid[37];
+			sprintf(uuid, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+					uuidcmd->byte0, uuidcmd->byte1, uuidcmd->byte2, uuidcmd->byte3,
+					uuidcmd->byte4, uuidcmd->byte5, uuidcmd->byte6, uuidcmd->byte7,
+					uuidcmd->byte8, uuidcmd->byte9, uuidcmd->byte10, uuidcmd->byte11,
+					uuidcmd->byte12, uuidcmd->byte13, uuidcmd->byte14, uuidcmd->byte15);
+			_uuid = uuid;
+			break;
     }
 }
 
@@ -1526,7 +1609,9 @@ int main(int argc, char* argv[]) {
         if (ctx.open()) {
             if (ctx.is_print_mode()) {
                 ctx.print_info();
-            } else {
+            } else if (ctx.is_uuid_mode()) {
+                ctx.print_uuids();
+			} else {
                 ctx.save_all_images();
             }
         }
