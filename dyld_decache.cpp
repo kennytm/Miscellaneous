@@ -1040,7 +1040,8 @@ public:
 
 private:
     void print_usage(char* path) const {
-        const char* progname = path ? strrchr(path, '/')+1 : "dyld_decache";
+        const char* progname = path ? strrchr(path, '/') : NULL;
+        progname = progname ? progname + 1 : "dyld_decache";
         printf(
             "dyld_decache v0.1c\n"
             "Usage:\n"
