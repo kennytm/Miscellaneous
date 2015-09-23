@@ -122,6 +122,12 @@ struct load_command {
 	uint32_t cmdsize;
 };
 
+struct load_command64 {
+	uint32_t pad0; // dunno what this is - it's often zero, but also often not!
+	uint32_t cmd;
+	uint32_t cmdsize;
+};
+
 #define LC_REQ_DYLD 0x80000000
 
 #define	LC_SEGMENT	0x1
@@ -352,22 +358,11 @@ struct category_t {
 };
 
 struct uuid_command : load_command {
-	uint8_t byte0;
-	uint8_t byte1;
-	uint8_t byte2;
-	uint8_t byte3;
-	uint8_t byte4;
-	uint8_t byte5;
-	uint8_t byte6;
-	uint8_t byte7;
-	uint8_t byte8;
-	uint8_t byte9;
-	uint8_t byte10;
-	uint8_t byte11;
-	uint8_t byte12;
-	uint8_t byte13;
-	uint8_t byte14;
-	uint8_t byte15;
+	uint8_t bytes[16];
+};
+
+struct uuid_command64 : load_command64 {
+	uint8_t bytes[16];
 };
 
 #define BIND_OPCODE_MASK					0xF0
@@ -438,8 +433,6 @@ class ExtraStringRepository {
 
     boost::unordered_map<const char*, int> _indices;
     std::vector<Entry> _entries;
-    size_t _total_size;
-
     section _template;
 
 public:
@@ -614,6 +607,18 @@ protected:
         }
     }
 
+    template <typename T>
+    void foreach_command64(void(T::*action)(const load_command64* cmd)) {
+        const unsigned char* cur_cmd = reinterpret_cast<const unsigned char*>(_header + 1);
+
+        for (uint32_t i = 0; i < _header->ncmds; ++ i) {
+            const load_command64* cmd = reinterpret_cast<const load_command64*>(cur_cmd);
+            cur_cmd += cmd->cmdsize;
+
+            (static_cast<T*>(this)->*action)(cmd);
+        }
+    }
+
     // Convert VM address to file offset of the decached file _before_ inserting
     //  the extra sections.
     long from_vmaddr(uint32_t vmaddr) const {
@@ -627,6 +632,8 @@ protected:
 private:
     void retrieve_segments_and_libords(const load_command* cmd);
     void retrieve_uuid(const load_command* cmd);
+    void retrieve_uuid64(const load_command64* cmd);
+    void set_uuid(const uint8_t* bytes);
 
 public:
     // Checks if the VM address is included in the decached file _before_
@@ -654,10 +661,10 @@ public:
 
 	void find_uuid()
 	{
-        if (_header->magic != 0xfeedface)
-            return;
-
-        this->foreach_command(&MachOFile::retrieve_uuid);
+        if (_header->magic == 0xfeedface)
+			this->foreach_command(&MachOFile::retrieve_uuid);
+		else if (_header->magic == 0xfeedfacf)
+			this->foreach_command64(&MachOFile::retrieve_uuid64);
     }
 
     const mach_header* header() const { return _header; }
@@ -1351,15 +1358,29 @@ void MachOFile::retrieve_uuid(const load_command* cmd) {
             break;
 		case LC_UUID:
 			const uuid_command* uuidcmd = static_cast<const uuid_command*>(cmd);
-			char uuid[37];
-			sprintf(uuid, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
-					uuidcmd->byte0, uuidcmd->byte1, uuidcmd->byte2, uuidcmd->byte3,
-					uuidcmd->byte4, uuidcmd->byte5, uuidcmd->byte6, uuidcmd->byte7,
-					uuidcmd->byte8, uuidcmd->byte9, uuidcmd->byte10, uuidcmd->byte11,
-					uuidcmd->byte12, uuidcmd->byte13, uuidcmd->byte14, uuidcmd->byte15);
-			_uuid = uuid;
+			set_uuid(uuidcmd->bytes);
 			break;
     }
+}
+
+void MachOFile::retrieve_uuid64(const load_command64* cmd) {
+    switch (cmd->cmd) {
+        default:
+            break;
+		case LC_UUID:
+			const uuid_command64* uuidcmd = static_cast<const uuid_command64*>(cmd);
+			set_uuid(uuidcmd->bytes);
+			break;
+    }
+}
+
+void MachOFile::set_uuid(const uint8_t* bytes)
+{
+	char uuid[37];
+	sprintf(uuid, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+			bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+			bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+	_uuid = uuid;
 }
 
 void DecachingFile::write_segment_content(const segment_command* segcmd) {
