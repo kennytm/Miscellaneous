@@ -166,7 +166,7 @@ def get_decryption_info(plist_obj, output_dir, url=None):
     print("<Info> iOS version {0}, build {1} {2}".format(version, build_train, build_number))
 
     if url is None:
-        url = 'http://theiphonewiki.com/wiki/index.php?title={0}_{1}_({2})'.format(build_train.translate({0x20:'_'}), build_number, product_name.translate({0x20:'_'}))
+        url = 'http://theiphonewiki.com/wiki/index.php?title={0}_{1}_({2})'.format(build_train.translate({0x20:'_'}), build_number, product_type.translate({0x20:'_'}))
 
     print("<Info> Downloading decryption keys from '{0}'...".format(url))
 
@@ -179,7 +179,10 @@ def get_decryption_info(plist_obj, output_dir, url=None):
     headers = htmldoc.iterfind('//h2/span[@class="mw-headline"]')
     key_map = {}
     for tag in headers:
+        span_text = tag[0].text_content().lower()
         header_name = _parenthesis_sub('', tag.text_content()).strip().lower()
+        if header_name.startswith(span_text):
+            header_name = header_name[len(span_text):]
         header_name = _header_replacement_get(header_name, header_name)
         ul = tag.getparent().getnext()
         if ul.tag == 'ul':
@@ -194,8 +197,6 @@ def get_decryption_info(plist_obj, output_dir, url=None):
             if m:
                 (key_type, key_value) = m.groups()
                 key_type = key_type.strip()
-                if key_type == 'RootFS':
-                    key_type += ' Key'
                 keys[key_type] = key_value
         key_map[header_name] = keys
 
@@ -341,8 +342,8 @@ def main():
 
         if 'Key' in keys and 'IV' in keys:
             decrypt_img3(filename, info['dec_path'], keys['Key'], keys['IV'])
-        elif 'RootFS Key' in keys:
-            vfdecrypt(filename, info['dec_path'], keys['RootFS Key'], options.vfdecrypt)
+        elif 'Key' in keys:
+            vfdecrypt(filename, info['dec_path'], keys['Key'], options.vfdecrypt)
 
         if os.path.exists(dec_path):
             try:
